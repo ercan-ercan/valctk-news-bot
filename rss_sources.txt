@@ -1,0 +1,7 @@
+http://sondakika.haber7.com/sondakika.rss
+https://www.sozcu.com.tr/feeds-son-dakika
+https://www.sabah.com.tr/rss/sondakika.xml
+https://feeds.bbci.co.uk/turkce/rss.xml
+https://www.cnnturk.com/feed/rss/all/news
+https://www.ntv.com.tr/rss
+https://www.hurriyet.com.tr/rss/anasayfa

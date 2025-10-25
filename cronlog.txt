@@ -1,0 +1,50 @@
+Traceback (most recent call last):
+  File "/Users/ercanfidan/Projects/auto-tweet-bot/auto_rewriter_simple.py", line 110, in <module>
+    main()
+    ~~~~^^
+  File "/Users/ercanfidan/Projects/auto-tweet-bot/auto_rewriter_simple.py", line 75, in main
+    me = client.get_me().data.username
+         ~~~~~~~~~~~~~^^
+  File "/Users/ercanfidan/Projects/auto-tweet-bot/.venv/lib/python3.14/site-packages/tweepy/client.py", line 2459, in get_me
+    return self._make_request(
+           ~~~~~~~~~~~~~~~~~~^
+        "GET", f"/2/users/me", params=params,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        endpoint_parameters=("expansions", "tweet.fields", "user.fields"),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        data_type=User, user_auth=user_auth
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/ercanfidan/Projects/auto-tweet-bot/.venv/lib/python3.14/site-packages/tweepy/client.py", line 129, in _make_request
+    response = self.request(method, route, params=request_params,
+                            json=json, user_auth=user_auth)
+  File "/Users/ercanfidan/Projects/auto-tweet-bot/.venv/lib/python3.14/site-packages/tweepy/client.py", line 115, in request
+    raise TooManyRequests(response)
+tweepy.errors.TooManyRequests: 429 Too Many Requests
+Too Many Requests
+Giriş: OK
+
+--- KAYNAK ---
+@darkwebhaber | id=1981689842804396337
+Hindistan'da raylara çıkıp sosyal medya için video çeken genç, tren çarpması sonucu hayatını kaybetti.
+ https://t.co/UhKowNqrZ9
+--- PLAN ---
+1) Ana tweet: (kaynak metin aynen)
+2) Cevap: '— Kaynak: @darkwebhaber'
+→ Ana tweet gönderildi. ID: 1981692151688827023
+
+[FEED] http://sondakika.haber7.com/sondakika.rss
+  başlık: Hayat kurtaran cesaret: Çin'de nehre düşen sürücüyü 40 yaşındaki kahraman kurtardı
+  (filtre dışı) Hayat kurtaran cesaret: Çin'de nehre düşen sürücüyü 40 yaşındaki kahraman kurtar…
+
+[FEED] https://www.sozcu.com.tr/feeds-son-dakika
+  yeni haber yok.
+
+[FEED] https://www.sabah.com.tr/rss/sondakika.xml
+  yeni haber yok.
+
+[FEED] https://feeds.bbci.co.uk/turkce/rss.xml
+  yeni haber yok.
+
+Bitti. Toplam gönderilen: 0
