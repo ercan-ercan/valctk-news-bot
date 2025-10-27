@@ -1,104 +1,85 @@
 name: Valctk News Bot
 
-# ── İzinler: sadece repo içeriğini okumaya ihtiyaç var
-permissions:
-  contents: read
-
-# ── Aynı workflow eşzamanlı tetiklenirse eskisini iptal et
-concurrency:
-  group: valctk-news-bot-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 on:
   schedule:
     - cron: "*/30 * * * *"     # RSS: her 30 dk (UTC)
     - cron: "5 15 * * 1-5"     # Döviz/Altın: hafta içi 18:05 TR ≈ 15:05 UTC
-  workflow_dispatch: {}        # Manuel çalıştırma
+  workflow_dispatch: {}
 
 jobs:
   rss:
-    # Sadece 30 dk’lık cron’da veya manuel tetikte çalışsın
     if: github.event.schedule == '*/30 * * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
-      API_KEY:              ${{ secrets.API_KEY }}
-      API_SECRET:           ${{ secrets.API_SECRET }}
-      ACCESS_TOKEN:         ${{ secrets.ACCESS_TOKEN }}
-      ACCESS_TOKEN_SECRET:  ${{ secrets.ACCESS_TOKEN_SECRET }}
-      BEARER_TOKEN:         ${{ secrets.BEARER_TOKEN }}
+      API_KEY: ${{ secrets.API_KEY }}
+      API_SECRET: ${{ secrets.API_SECRET }}
+      ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+      ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
+      BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.11"
 
-      - name: Restore pip cache
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
           restore-keys: pip-${{ runner.os }}-
 
-      - name: Install deps
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      - name: Restore RSS state
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: rss_state.json
           key: rss-state-${{ github.run_id }}
           restore-keys: rss-state-
 
-      - name: Run RSS bot
-        run: python -u auto_rss_bot.py --max-posts 2 --per-feed 2
+      # Özetleyici OpenAI aktif. max-posts/per-feed’i istersen burada ayarlarsın.
+      - run: python -u auto_rss_bot.py --max-posts 2 --per-feed 2
 
-      - name: Save RSS state
-        if: always()
+      - if: always()
         uses: actions/cache/save@v4
         with:
           path: rss_state.json
           key: rss-state-${{ github.run_id }}
 
   fx:
-    # Sadece 18:05 TR (15:05 UTC) cron’unda veya manuel tetikte çalışsın
     if: github.event.schedule == '5 15 * * 1-5' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
-      API_KEY:              ${{ secrets.API_KEY }}
-      API_SECRET:           ${{ secrets.API_SECRET }}
-      ACCESS_TOKEN:         ${{ secrets.ACCESS_TOKEN }}
-      ACCESS_TOKEN_SECRET:  ${{ secrets.ACCESS_TOKEN_SECRET }}
-      BEARER_TOKEN:         ${{ secrets.BEARER_TOKEN }}
+      API_KEY: ${{ secrets.API_KEY }}
+      API_SECRET: ${{ secrets.API_SECRET }}
+      ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+      ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
+      BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.11"
 
-      - name: Restore pip cache
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
           restore-keys: pip-${{ runner.os }}-
 
-      - name: Install deps
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      - name: Restore FX state
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: fx_state.json
           key: fx-state-${{ github.run_id }}
           restore-keys: fx-state-
 
-      - name: Run FX bot
-        run: python -u auto_fx_bot.py
+      - run: python -u auto_fx_bot.py
 
-      - name: Save FX state
-        if: always()
+      - if: always()
         uses: actions/cache/save@v4
         with:
           path: fx_state.json
