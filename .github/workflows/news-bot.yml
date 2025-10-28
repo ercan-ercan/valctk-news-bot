@@ -2,8 +2,8 @@ name: Valctk News Bot
 
 on:
   schedule:
-    - cron: "0 * * * *"        # RSS: her 1 saatte 1 kez (UTC)
-    - cron: "1 15 * * 1-5"     # FX: hafta içi 18:01 TR (15:01 UTC)
+    - cron: "0 * * * *"      # RSS: saat başı (UTC)  → TR’de saat başı
+    - cron: "1 15 * * 1-5"   # FX: Hafta içi 18:01 TR ≈ 15:01 UTC
   workflow_dispatch: {}
 
 jobs:
@@ -16,11 +16,12 @@ jobs:
       ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
       ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
       BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # OPENAI_API_KEY kullanmıyoruz (ücretsiz mod)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
@@ -32,7 +33,7 @@ jobs:
           path: rss_state.json
           key: rss-state-${{ github.run_id }}
           restore-keys: rss-state-
-      - run: python -u auto_rss_bot.py --max-posts 2 --per-feed 2
+      - run: python -u auto_rss_bot.py --max-posts 1 --per-feed 1
       - if: always()
         uses: actions/cache/save@v4
         with:
@@ -48,11 +49,12 @@ jobs:
       ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
       ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
       BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
-      FX_IMAGE_PATH: assets/doviz.jpg
+      FX_BG_PATH: assets/fx_bg.jpg
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
