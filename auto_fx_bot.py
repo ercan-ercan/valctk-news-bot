@@ -1,92 +1,107 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-auto_fx_bot.py — 18:01'de döviz/altın özetini, sabit bir görselle tweetler.
-- Pillow yok; varolan görsel dosyasını (assets/doviz.jpg) media olarak ekler.
-- Kısa, net ve resmi dilden uzak, temiz noktalama.
+auto_fx_bot.py — Kapanış | Döviz & Altın
+- Kaynaklar:
+  * USDTRY & EURTRY: exchangerate.host (ücretsiz, anahtarsız)
+  * XAUUSD: goldprice.org public JSON (ücretsiz, anahtarsız)
+- Gram Altın = (XAUUSD / 31.1035) * USDTRY
+- Tam Altın (yaklaşık) = Gram * 7.016
 """
 
-import os, time, json, math
+import os, argparse, math, time
 import requests
 import tweepy
 
-API_KEY             = os.getenv("API_KEY")
-API_SECRET          = os.getenv("API_SECRET")
-ACCESS_TOKEN        = os.getenv("ACCESS_TOKEN")
-ACCESS_TOKEN_SECRET = os.getenv("ACCESS_TOKEN_SECRET")
-BEARER_TOKEN        = os.getenv("BEARER_TOKEN")
+HEADERS = {"User-Agent": "ValctkNewsBot/1.0"}
 
-FX_IMAGE_PATH       = os.getenv("FX_IMAGE_PATH", "assets/doviz.jpg")  # workflow env'de tanımlı
+def tr_format(x: float) -> str:
+    # Türkçe sayı biçimi: binlik nokta, ondalık virgül
+    s = f"{x:,.2f}"
+    # s = '12,345.67' -> '12.345,67'
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
-# ---- basit fiyat toplayıcılar (kaynaklar stabil değilse mevcut botundaki fonksiyonları kullan) ----
-# Burada örnek olarak TradingView'in lightweight endpointlerinden kaçınmak için 
-# Yahoo Finance benzeri basit JSON proxy'leri yerine, mevcut dosyandaki kaynak fonksiyonlarını koruman iyi olur.
-# Eğer mevcut botunda çalışan get_rates() fonksiyonun varsa onu kullan.
-# Aşağıdaki dummy fonksiyon, bir  yedek / örnek şablon:
+def fetch_usdtry_eurtry(debug=False):
+    # USD->TRY ve EUR->TRY ayrı çağrı (daha sağlam)
+    u = "https://api.exchangerate.host/latest?base=USD&symbols=TRY,EUR"
+    e = "https://api.exchangerate.host/latest?base=EUR&symbols=TRY,USD"
+    r1 = requests.get(u, timeout=12, headers=HEADERS)
+    r2 = requests.get(e, timeout=12, headers=HEADERS)
 
-def get_rates():
-    """
-    Dolar/TL, Euro/TL, Sterlin/TL ve Gram Altın için float döndür.
-    Burayı kendi çalışan kaynaklarınla doldurmuştuk; onları kullan.
-    """
-    # --- ÖRNEK YER TUTUCU (gerçek veriyi kendi fonksiyonlarından çek) ---
-    # raise NotImplementedError("Mevcut auto_fx_bot içindeki veri kaynaklarını burada kullan.")
-    # Aşağıyı kendi fonksiyonlarınla değiştir:
-    return {
-        "USDTRY": None,
-        "EURTRY": None,
-        "GBPTRY": None,
-        "GAU":    None,   # gram altın
-    }
+    r1.raise_for_status(); r2.raise_for_status()
+    d1 = r1.json(); d2 = r2.json()
 
-def fmt(v):
-    return ("—" if v is None else f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    usdtry = float(d1["rates"]["TRY"])
+    eurtry = float(d2["rates"]["TRY"])
+    if debug:
+        print(f"DEBUG FX: USDTRY={usdtry} EURTRY={eurtry}")
+    return usdtry, eurtry
 
-def build_text(r):
-    # emoji yok, kısa ve net
+def fetch_xauusd(debug=False):
+    # GoldPrice.org public feed (USD/oz)
+    # Örn cevap: {"items":[{"curr":"USD","xauPrice":...,"xagPrice":...}]}
+    g = "https://data-asg.goldprice.org/dbXRates/USD"
+    r = requests.get(g, timeout=12, headers=HEADERS)
+    r.raise_for_status()
+    j = r.json()
+    items = j.get("items") or []
+    if not items:
+        raise RuntimeError("XAU feed boş")
+    xauusd = float(items[0].get("xauPrice"))
+    if debug:
+        print(f"DEBUG XAU: XAUUSD={xauusd}")
+    return xauusd
+
+def compute_prices(debug=False):
+    usdtry, eurtry = fetch_usdtry_eurtry(debug=debug)
+    xauusd = fetch_xauusd(debug=debug)
+
+    gram = (xauusd / 31.1035) * usdtry
+    tam  = gram * 7.016  # yaklaşık saf altın karşılığı
+
+    return usdtry, eurtry, gram, tam
+
+def make_text(usdtry, eurtry, gram, tam):
     lines = []
-    lines.append("Gün sonu piyasa özeti:")
-    lines.append(f"Dolar: {fmt(r['USDTRY'])} • Euro: {fmt(r['EURTRY'])} • Sterlin: {fmt(r['GBPTRY'])}")
-    lines.append(f"Gram altın: {fmt(r['GAU'])}")
-    return "\n".join(lines).strip()
+    lines.append("Kapanış | Döviz & Altın")
+    lines.append(f"Dolar:        {tr_format(usdtry)}")
+    lines.append(f"Euro:         {tr_format(eurtry)}")
+    lines.append(f"Gram Altın:   {tr_format(gram)}")
+    lines.append(f"Tam Altın:    {tr_format(tam)}")
+    return "\n".join(lines)
 
-# ---- Twitter client + media upload ----
-def get_clients():
-    client = tweepy.Client(
-        consumer_key=API_KEY,
-        consumer_secret=API_SECRET,
-        access_token=ACCESS_TOKEN,
-        access_token_secret=ACCESS_TOKEN_SECRET,
-        bearer_token=BEARER_TOKEN
-    )
-    # v1.1 medya yüklemek için
+def tweet(text, dry=False):
+    if dry:
+        print("\n--- TWEET (DRY) ---")
+        print(text)
+        return
+
+    API_KEY = os.getenv("API_KEY")
+    API_SECRET = os.getenv("API_SECRET")
+    ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
+    ACCESS_TOKEN_SECRET = os.getenv("ACCESS_TOKEN_SECRET")
+
+    if not all([API_KEY, API_SECRET, ACCESS_TOKEN, ACCESS_TOKEN_SECRET]):
+        raise RuntimeError("Twitter kimlikleri .env içinde eksik!")
+
     auth = tweepy.OAuth1UserHandler(API_KEY, API_SECRET, ACCESS_TOKEN, ACCESS_TOKEN_SECRET)
-    api_v1 = tweepy.API(auth)
-    return client, api_v1
-
-def post_with_image(text, image_path):
-    client, api_v1 = get_clients()
-    media_ids = None
-    if image_path and os.path.exists(image_path):
-        media = api_v1.media_upload(image_path)
-        # Tweepy Client v2 iki farklı imla destekleyebilir; ikisini de deneriz:
-        try:
-            client.create_tweet(text=text, media={"media_ids": [media.media_id]})
-            return
-        except Exception:
-            pass
-        client.create_tweet(text=text, media_ids=[media.media_id])
-    else:
-        client.create_tweet(text=text)
+    api = tweepy.API(auth)
+    api.update_status(text)
+    print("→ Gönderildi.")
 
 def main():
-    rates = get_rates()
-    text = build_text(rates)
-    # güvenli uzunluk
-    if len(text) > 270:
-        text = text[:267].rstrip() + "..."
-    post_with_image(text, FX_IMAGE_PATH)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry", action="store_true")
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args()
+
+    try:
+        usdtry, eurtry, gram, tam = compute_prices(debug=args.debug)
+        text = make_text(usdtry, eurtry, gram, tam)
+        tweet(text, dry=args.dry)
+    except Exception as e:
+        print(f"Veri alınamadı: {e}")
+        print("⚠️ Veriler alınamadı, tweet atlanıyor.")
 
 if __name__ == "__main__":
     main()
