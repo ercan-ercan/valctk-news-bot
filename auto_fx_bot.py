@@ -47,7 +47,7 @@ def build_text(r):
     # emoji yok, kısa ve net
     lines = []
     lines.append("Gün sonu piyasa özeti:")
-    lines.append(f"Dolar/TL: {fmt(r['USDTRY'])} • Euro/TL: {fmt(r['EURTRY'])} • Sterlin/TL: {fmt(r['GBPTRY'])}")
+    lines.append(f"Dolar: {fmt(r['USDTRY'])} • Euro: {fmt(r['EURTRY'])} • Sterlin: {fmt(r['GBPTRY'])}")
     lines.append(f"Gram altın: {fmt(r['GAU'])}")
     return "\n".join(lines).strip()
 
