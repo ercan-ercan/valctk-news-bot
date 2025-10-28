@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-auto_rss_bot.py  —  API'siz özetleyici
-- RSS'leri okur, sayfa içeriğini indirir (requests + bs4).
-- Kural-tabanlı özet: kısa ve net; doğrudan alıntılar tırnak içinde.
-- Liste/aday/takım gibi durumlarda madde madde; aksi halde akıcı 1–2 cümle.
-- Link paylaşmaz. 280 karakter korumalı.
-- Filtre: gündem/siyaset/ekonomi/spor/teknoloji/sosyal (X etkileşimi odaklı).
-- Dedup: rss_state.json (aynı haber tekrar atılmaz).
-"""
 
-import os, sys, json, time, argparse, re
-from typing import List, Tuple, Dict
+import os, sys, re, time, json, argparse
 import requests, feedparser, tweepy
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-# ================== AYARLAR ==================
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ValctkNewsBot/2.0)"}
 STATE_PATH = "rss_state.json"
 
-RSS_SOURCES_DEFAULT = [
+RSS_SOURCES_FALLBACK = [
     "http://sondakika.haber7.com/sondakika.rss",
     "https://www.sozcu.com.tr/feeds-son-dakika",
     "https://www.sabah.com.tr/rss/sondakika.xml",
@@ -29,38 +19,8 @@ RSS_SOURCES_DEFAULT = [
     "https://www.hurriyet.com.tr/rss/anasayfa",
 ]
 
-# X dili/konu filtresi (alt-case arama)
-KEYWORDS = [
-    # Politika & Ekonomi
-    "son dakika","sondakika","seçim","cumhurbaşkanı","bakan","meclis",
-    "zam","asgari ücret","enflasyon","faiz","dolar","euro","vergi","emekli","maaş","bütçe",
-    "açıklandı","resmen","pfdk","tff","bddk","mb","merkez bankası",
-    # Felaket & Kriz
-    "deprem","yangın","fırtına","sel","patlama","saldırı",
-    "gözaltı","tutuklandı","ceza","katliam",
-    # Spor
-    "maç","transfer","derbi","hakem","sakatlık","kadro",
-    "beşiktaş","galatasaray","fenerbahçe","trabzonspor","milli takım","pfdk",
-    "arda güler","kenan yıldız","icardi","muslera",
-    # Sosyal & Trend
-    "kadın","çocuk","adalet","kavga","tepki çekti","gündem oldu","video","görüntü",
-    # Teknoloji
-    "apple","iphone","ios","macbook","samsung","galaxy","android","yapay zeka","ai",
-    # Dünya
-    "gazze","israil","iran","putin","trump","abd","nato","savaş","ateşkes",
-]
+# ——— Yardımcılar ————————————————————————————————————————
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ValctkNewsBot/2.0)"}
-
-# Spor kulüpleri (liste tespiti ve öncelik)
-TEAMS = [
-    "Fenerbahçe","Galatasaray","Beşiktaş","Trabzonspor","Başakşehir","Kasımpaşa","Sivasspor","Rizespor",
-    "Alanyaspor","Antalyaspor","Adana Demirspor","Hatayspor","Konyaspor","Göztepe","Kayserispor","Ankaragücü",
-    "Samsunspor","Pendikspor","Gaziantep FK","İstanbulspor","Karagümrük","Bodrum FK","Eyüpspor","Kocaelispor",
-]
-TEAMS_L = [t.lower() for t in TEAMS]
-
-# ================== YARDIMCILAR ==================
 def load_env_or_die():
     load_dotenv()
     need = ["API_KEY","API_SECRET","ACCESS_TOKEN","ACCESS_TOKEN_SECRET","BEARER_TOKEN"]
@@ -78,206 +38,245 @@ def tw_client():
         wait_on_rate_limit=False
     )
 
-def load_sources(path="rss_sources.txt") -> List[str]:
+def load_sources(path="rss_sources.txt"):
     if os.path.exists(path):
         out = []
-        with open(path,"r",encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if s and not s.startswith("#"):
-                    out.append(s)
+        for line in open(path,"r",encoding="utf-8"):
+            s = line.strip()
+            if s and not s.startswith("#"):
+                out.append(s)
         if out: return out
-    return RSS_SOURCES_DEFAULT[:]  # yedek
+    return RSS_SOURCES_FALLBACK
 
-def load_state() -> Dict:
+def load_state():
     if not os.path.exists(STATE_PATH): return {}
     try:
         return json.load(open(STATE_PATH,"r",encoding="utf-8"))
     except Exception:
         return {}
 
-def save_state(st: Dict):
+def save_state(st):
     json.dump(st, open(STATE_PATH,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
 
-def fetch_feed(url: str):
-    return feedparser.parse(url)
+def fetch(url, timeout=12):
+    return requests.get(url, headers=HEADERS, timeout=timeout)
+
+def clean_boiler(s: str) -> str:
+    if not s: return ""
+    s = re.sub(r"\b(GİRİŞ|GÜNCELLEME)\s*\d{2}\.\d{2}\.\d{4}.*?$", "", s, flags=re.I)
+    s = re.sub(r"\b(Bu Habere \d+ Yorum Yapılmış).*?$", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def fetch_article(link: str) -> str:
     try:
-        r = requests.get(link, headers=HEADERS, timeout=12)
+        r = fetch(link)
         r.raise_for_status()
     except Exception:
         return ""
     soup = BeautifulSoup(r.text, "lxml")
     for tag in soup(["script","style","noscript","header","footer","nav","aside"]):
         tag.decompose()
-    # muhtemel içerik kapları
-    cand = soup.select("article, div.article, div.haber_metni, div.news-detail, div#NewsDetail, div.entry, div.content, main")
-    if not cand: cand = [soup]
-    chunks = []
-    for c in cand:
-        for li in c.select("li"):
-            t = li.get_text(" ", strip=True)
-            if len(t) > 2: chunks.append(t)
-        for p in c.find_all("p"):
-            t = p.get_text(" ", strip=True)
-            if len(t) > 2: chunks.append(t)
-    if not chunks:
-        return soup.get_text(" ", strip=True)
-    return "\n".join(chunks)
+    # haber metni adayları
+    selectors = [
+        "article", "div.article", "div#content", "div.content",
+        "div.haber_metni", "div#NewsDetail", "div.news-detail",
+        "div.detail", "div#haberMetni", "section.article"
+    ]
+    blocks = []
+    for sel in selectors:
+        for c in soup.select(sel):
+            txts = []
+            for li in c.select("li"):
+                t = li.get_text(" ", strip=True)
+                if len(t) > 3: txts.append(t)
+            for p in c.find_all("p"):
+                t = p.get_text(" ", strip=True)
+                if len(t) > 3: txts.append(t)
+            if txts:
+                blocks.append("\n".join(txts))
+    if not blocks:
+        return clean_boiler(soup.get_text(" ", strip=True))
+    body = "\n".join(blocks)
+    return clean_boiler(body)
 
-def normalize_spaces(s: str) -> str:
-    s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\s+\n", "\n", s)
-    s = re.sub(r"\n{3,}", "\n\n", s)
-    return s.strip()
+def sentence_split(text: str):
+    if not text: return []
+    # “3. Tur” gibi kısaltmalarda cümleyi bölmemek için geçici işaret
+    text = re.sub(r"(\d)\.(\s*[Tt]ur\b)", r"\1·\2", text)
+    # cümlelere böl
+    parts = re.split(r"(?<=[\.\!\?])\s+", text)
+    out = []
+    for p in parts:
+        p = p.replace("·", ".").strip()
+        if p:
+            out.append(p)
+    return out
 
-def sentences(text: str) -> List[str]:
-    parts = re.split(r'(?<=[\.\!\?])\s+', text)
-    return [p.strip() for p in parts if p and len(p.strip()) > 2]
+def clamp_text(s: str, maxlen=280):
+    s = s.strip()
+    if len(s) <= maxlen:
+        return s
+    cut = s[:maxlen]
+    # Son noktalama/kısa çizgi vs. den geriye yasla
+    m = re.search(r"[\.!\?…—-]\s*(?!.*[\.!\?…—-])", cut)
+    if m:
+        return cut[:m.end()].rstrip()
+    # kelime ortasında kesme
+    if " " in cut:
+        return cut.rsplit(" ",1)[0] + "…"
+    return cut + "…"
 
-def has_keyword(title: str, summary: str) -> bool:
+def tidy_title(t: str) -> str:
+    t = (t or "").strip()
+    t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"\s*([.!?])\s*$", r"\1", t)
+    # “..” “!!” vb sadeleştir
+    t = re.sub(r"([.!?])\1+", r"\1", t)
+    return t
+
+# ——— İsim listesi/aday çıkarımı ———————————————————————————————
+
+NAME_RE = re.compile(
+    r"\b([A-ZÇĞİÖŞÜ][a-zçğıöşü\.]+(?:\s+[A-ZÇĞİÖŞÜ][a-zçğıöşü\.]+){1,2})\b"
+)
+
+STOP_SINGLE = set([
+    "Bu","Şu","Bir","Ve","FED","Air","Force","One","Hazine","Bakanı","Başkanı","ABD",
+    "Türkiye","İstanbul","Ankara","Resmen","Son","Dakika","Cumhurbaşkanı","Bakan"
+])
+
+def extract_candidate_names(text: str, want_min=3):
+    if not text: return []
+    # liste block’larını yakala
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    picks = []
+    for ln in lines:
+        # madde imi varsa ağırlık ver
+        if ln.startswith(("-", "•", "—", "*")):
+            ln = ln.lstrip("-•—* ").strip()
+        for m in NAME_RE.findall(ln):
+            # en az 2 kelime
+            if len(m.split()) < 2:
+                continue
+            # tekil stopword’leri ayıkla
+            parts = m.split()
+            if any(w in STOP_SINGLE for w in parts):
+                # örn: "Hazine Bakanı Scott Bessent" — sadece tam adı bırak
+                # sonda 2-3 kelimelik tam ad varsa onu al
+                tail = " ".join([w for w in parts if w not in STOP_SINGLE])
+                if len(tail.split()) >= 2:
+                    picks.append(tail)
+                continue
+            picks.append(m)
+    # virgüllü paragraflardan da toparla
+    for chunk in re.split(r"[;\n]", text):
+        for m in NAME_RE.findall(chunk):
+            if len(m.split()) >= 2 and not any(w in STOP_SINGLE for w in m.split()):
+                picks.append(m)
+
+    # normalize & uniq (orijinal sırayı koru)
+    seen = set()
+    uniq = []
+    for x in picks:
+        x = re.sub(r"\s+", " ", x).strip(" .,:;–-")
+        # “Başkanı Jerome Powell” -> “Jerome Powell”
+        x = re.sub(r"^(Başkanı|Bakanı|Valisi|Prof\.?|Doç\.?|Dr\.?)\s+", "", x)
+        if len(x.split()) < 2: 
+            continue
+        key = x.lower()
+        if key not in seen:
+            seen.add(key)
+            uniq.append(x)
+
+    # çok uzun değil, 2-3 kelime ideali
+    cleaned = []
+    for n in uniq:
+        parts = n.split()
+        if 2 <= len(parts) <= 3:
+            cleaned.append(n)
+    # çok kısaysa en azından 3-5 isim toparla
+    if len(cleaned) < want_min:
+        cleaned = uniq[:want_min]
+    return cleaned[:10]
+
+def summarize_with_names(title: str, body: str):
+    """
+    ‘5 aday belli oldu / işte isimler’ vb. ise: başlık + isim listesi (tam adlar).
+    Değilse: normal kısa özet.
+    """
+    t = tidy_title(title)
+    hay = (title + " " + body).lower()
+    trigger = any(k in hay for k in [
+        "5 aday", "beş aday", "aday belli oldu", "işte adaylar", "kadro açıklandı",
+        "hakemleri açıklandı", "liste açıklandı"
+    ])
+
+    if trigger:
+        names = extract_candidate_names(body, want_min=3)
+        if names:
+            lines = [t] + [f"- {n}" for n in names[:8]]
+            return clamp_text("\n".join(lines), 280)
+
+    # normal kısa özet: başlık + ilk anlamlı cümle
+    sents = sentence_split(body)
+    lead = ""
+    for s in sents:
+        if len(s) >= 40:  # çok ufak değilse
+            lead = s
+            break
+    if not lead and sents:
+        lead = sents[0]
+    text = t if not lead else f"{t} {lead}"
+    # tırnakları koru, fazla boşlukları düzelt
+    text = re.sub(r"\s+", " ", text)
+    return clamp_text(text, 280)
+
+# ——— Filtre (gündem/ekonomi/siyaset/spor/teknoloji/sosyal) ———————————
+
+KEYWORDS = [
+    # Politika & Ekonomi
+    "son dakika","seçim","cumhurbaşkanı","bakan","meclis","enflasyon","faiz",
+    "dolar","euro","vergi","asgari ücret","emekli","bütçe","mb", "merkez bankası",
+    # Felaket & Asayiş
+    "deprem","yangın","fırtına","sel","patlama","saldırı","cinayet","gözaltı","tutuklandı",
+    # Spor
+    "maç","transfer","derbi","hakem","sakatlık","kadro","pfdk","tff","fenerbahçe","galatasaray","beşiktaş","trabzonspor",
+    # Teknoloji
+    "apple","iphone","ios","samsung","galaxy","android","yapay zeka","ai",
+    # Sosyal & Trend
+    "tepki çekti","gündem oldu","video","görüntü","skandal","zam",
+    # Dünya / Savunma
+    "gazze","israil","iran","rusya","abd","nato","ateşkes","savaş"
+]
+
+def pass_filter(title, summary):
     hay = (title + " " + (summary or "")).lower()
     return any(k in hay for k in KEYWORDS)
 
-# ================== ÖZETLEYİCİ (kural tabanlı) ==================
-NAME_RE = re.compile(r"\b([A-ZÇĞİÖŞÜ][a-zçğıöşü]+(?:\s+[A-ZÇĞİÖŞÜ][a-zçğıöşü]+){0,2})\b")
+# ——— Akış ———————————————————————————————————————————————
 
-def extract_names(text: str) -> List[str]:
-    cands = []
-    for m in NAME_RE.findall(text):
-        low = m.lower()
-        if low in {"son","dakika","türkiye","bugün","yarın","dün"}:
-            continue
-        cands.append(m.strip())
-    # benzersiz sırayı koru
-    uniq = []
-    for x in cands:
-        if x not in uniq:
-            uniq.append(x)
-    return uniq[:10]
-
-def find_quoted(text: str) -> List[str]:
-    out = []
-    # Türkçe tırnak ve düz tırnak
-    for m in re.findall(r"[“\"']([^\"”']{6,180})[\"”']", text):
-        out.append(m.strip())
-    return out[:2]
-
-def detect_list_lines(text: str) -> List[str]:
-    lines = [l.strip() for l in text.splitlines()]
-    items = []
-    for l in lines:
-        if re.match(r"^[-••\*]\s+.{2,}", l):
-            items.append(re.sub(r"^[-•\*]\s+", "", l))
-    # virgül-listeleri de ayıkla
-    if not items:
-        m = re.search(r":\s*([A-ZÇĞİÖŞÜa-zçğıöşü0-9 ,\-\(\)\/]+)", text)
-        if m and "," in m.group(1):
-            parts = [p.strip() for p in m.group(1).split(",") if p.strip()]
-            if 2 <= len(parts) <= 10:
-                items = parts
-    # takım/aday listelerini sinyalle
-    clean = []
-    for it in items:
-        it = re.sub(r"\s{2,}", " ", it)
-        it = re.sub(r"\s*\.+$", "", it)
-        clean.append(it)
-    return clean[:8]
-
-def shorten(s: str, n: int) -> str:
-    s = normalize_spaces(s)
-    return s if len(s) <= n else (s[:n-1] + "…")
-
-def build_summary(title: str, body: str) -> str:
-    title = normalize_spaces(title)
-    body = normalize_spaces(body)
-
-    # 1) Çok bariz “liste haberi” ise madde madde
-    items = detect_list_lines(body)
-    if not items and any(word in title.lower() for word in ["aday","isim","kadro","kadroda","ceza","puan durumu","listesi"]):
-        # başlıkta sinyal varsa, metinden isim/kurum topla
-        names = extract_names(body)
-        if len(names) >= 3:
-            items = names[:6]
-
-    # 2) Alıntı varsa bir cümle alıntı ekle
-    quotes = find_quoted(title) or find_quoted(body)
-
-    # 3) Spor kulüpleri özel: takım adlarını öne çek
-    teams_in = [t for t in TEAMS if t.lower() in (title + " " + body).lower()]
-    is_sports_list = len(teams_in) >= 1 and ( "ceza" in body.lower() or "transfer" in body.lower() or "kadro" in body.lower())
-
-    # 4) Özet metni oluştur
-    if items or is_sports_list:
-        # Madde madde + başlık (başlık sade)
-        head = shorten(title, 140)
-        lines = [head]
-        if is_sports_list and teams_in:
-            # büyükleri öne al
-            prio = ["Fenerbahçe","Galatasaray","Beşiktaş","Trabzonspor"]
-            ordered = [t for t in prio if t in teams_in] + [t for t in teams_in if t not in prio]
-            for t in ordered[:6]:
-                lines.append(f"- {t}")
-        # genel liste
-        for it in items[:6]:
-            # isim/aday dizisi gibi olanları direkt yaz
-            lines.append(f"- {it}")
-        # alıntı ekle (varsa ve yer kalırsa)
-        if quotes:
-            q = f"“{quotes[0]}”"
-            if len("\n".join(lines + [q])) <= 280:
-                lines.append(q)
-        text = "\n".join(lines)
-        return shorten(text, 280)
-
-    # 5) Normal akış: 1–2 cümle net özet
-    sents = sentences(body)
-    lead = ""
-    for s in sents[:6]:
-        # çok genel ve reklamsı girişleri ele
-        if any(w in s.lower() for w in ["reklam","çerez","kabul ederek","okumak için tıklayın"]):
-            continue
-        lead = s
-        break
-    if not lead:
-        lead = title
-
-    # Alıntı ekle (tek cümle içine)
-    text = shorten(title, 120)
-    if quotes:
-        q = f" “{quotes[0]}”"
-        text = shorten(text + q, 160)
-
-    # Lead'i sonuna ekle (gerekiyorsa)
-    if lead and lead.lower() not in text.lower():
-        merged = f"{text}. {lead}"
-        return shorten(merged, 280)
-
-    return shorten(text, 280)
-
-# ================== ANA AKIŞ ==================
-def run_bot(dry: bool, max_posts: int, per_feed: int) -> Tuple[int,int,int]:
+def run_bot(dry: bool, max_posts: int, per_feed: int):
     client = tw_client()
     sources = load_sources()
     state = load_state()
+
     prepared = sent = skipped = 0
 
     for url in sources:
-        if sent >= max_posts:
-            break
+        if sent >= max_posts: break
         print(f"\n[FEED] {url}")
-        seen = set(state.get(url, {}).get("seen", []))
-        feed = fetch_feed(url)
+        st = state.get(url, {"seen": []})
+        seen = set(st.get("seen", []))
+
+        feed = feedparser.parse(url)
         entries = feed.entries if getattr(feed, "entries", None) else []
 
-        # zamana göre sırala (eski -> yeni)
         def ent_key(e):
             dt = getattr(e, "published_parsed", None) or getattr(e, "updated_parsed", None)
             return time.mktime(dt) if dt else 0
-        entries = sorted(entries, key=ent_key)
 
-        # yeni olanları çek
+        entries = sorted(entries, key=ent_key)
         fresh = []
         for e in entries:
             uid = e.get("id") or e.get("link")
@@ -290,22 +289,25 @@ def run_bot(dry: bool, max_posts: int, per_feed: int) -> Tuple[int,int,int]:
         take = min(len(fresh), per_feed, max_posts - sent)
         for e in fresh[-take:]:
             uid = e.get("id") or e.get("link")
-            title = (getattr(e, "title", "") or "").strip()
-            link  = (getattr(e, "link", "") or "").strip()
-            summary = getattr(e, "summary", "") or getattr(e, "subtitle", "")
+            title = tidy_title((getattr(e,"title","") or "").strip())
+            link  = (getattr(e,"link","") or "").strip()
+            summary = (getattr(e,"summary","") or getattr(e,"subtitle","") or "").strip()
+
             if not title or not link:
+                skipped += 1
                 continue
 
-            if not has_keyword(title, summary):
+            if not pass_filter(title, summary):
                 skipped += 1
                 continue
 
             body = fetch_article(link)
-            tweet = build_summary(title, body)
-            prepared += 1
+            tweet = summarize_with_names(title, body)
 
             print("\n--- TWEET ---")
             print(tweet)
+
+            prepared += 1
 
             if dry:
                 print("→ DRY-MODE (tweet edilmedi).")
@@ -313,35 +315,30 @@ def run_bot(dry: bool, max_posts: int, per_feed: int) -> Tuple[int,int,int]:
                 try:
                     client.create_tweet(text=tweet)
                     sent += 1
+                    st.setdefault("seen", []).append(uid)
+                    if len(st["seen"]) > 1000:
+                        st["seen"] = st["seen"][-500:]
                 except tweepy.TooManyRequests:
-                    print("→ Rate limit (429). Çıkılıyor.")
-                    save_state(state)
-                    return prepared, sent, skipped
+                    print("→ Rate limit (POST). Çıkılıyor.")
+                    save_state(state); sys.exit(0)
                 except tweepy.Forbidden as ex:
-                    # 453/403 gibi
-                    print(f"→ Hata: {ex}")
-                except tweepy.Unauthorized as ex:
-                    # 401
-                    print(f"→ Yetkisiz (401). Anahtarları kontrol et. Ayrıntı: {ex}")
+                    print(f"→ Hata 403: {ex}")
                 except Exception as ex:
                     print(f"→ Hata: {ex}")
 
-            # görüldü'ye ekle
-            st = state.get(url, {"seen": []})
+            # dry’de bile “görüldü”ye alalım ki aynı başlığı döndürüp durmasın
             st.setdefault("seen", []).append(uid)
-            if len(st["seen"]) > 1000:
-                st["seen"] = st["seen"][-500:]
-            state[url] = st
-            save_state(state)
 
             if sent >= max_posts:
                 break
 
+        state[url] = st
+        save_state(state)
+
     print(f"\nHazırlanan: {prepared} | Gönderilen: {sent} | Atlanan: {skipped}")
-    return prepared, sent, skipped
 
 def main():
-    ap = argparse.ArgumentParser(description="RSS -> Twitter (API'siz özet)")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--max-posts", type=int, default=2)
     ap.add_argument("--per-feed", type=int, default=2)
     ap.add_argument("--dry", action="store_true")
