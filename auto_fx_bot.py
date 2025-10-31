@@ -1,4 +1,3 @@
-cat > auto_fx_bot.py <<'PY'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
