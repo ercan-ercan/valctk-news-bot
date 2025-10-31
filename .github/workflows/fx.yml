@@ -20,7 +20,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests tweepy
+          pip install requests tweepy pillow
 
       - name: Sanity checks (files & badge)
         env:
