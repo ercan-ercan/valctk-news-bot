@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, re, argparse, textwrap, html, time
+import os
+import re
+import html
+import argparse
 from urllib.parse import urlparse
+
 import requests
 from bs4 import BeautifulSoup
 import tweepy
 
-# --- Config ---
-UA = {"User-Agent": "Mozilla/5.0 (compatible; BundleScraper/1.0)"}
+# ---- Ayarlar ----
+UA = {"User-Agent": "Mozilla/5.0 (compatible; BundleScraper/2.0)"}
 TIMEOUT = 12
-RESERVE_TCO = 25          # t.co kısaltmaya pay (link + boşluk)
 MAX_TWEET = 280
+TCO_RESERVE = 25  # t.co kısalması için kaba rezerv
 DRY = os.environ.get("DRY_MODE", "false").lower() == "true"
 
-# --- Twitter v2 client (metin-only) ---
+# ---- Twitter v2 ----
 API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
@@ -31,118 +35,168 @@ def tw_client_v2():
         wait_on_rate_limit=True,
     )
 
+# ---- Yardımcılar ----
 def get_html(url: str) -> BeautifulSoup:
     r = requests.get(url, headers=UA, timeout=TIMEOUT)
     r.raise_for_status()
     return BeautifulSoup(r.text, "lxml")
 
-def clean_text(s: str) -> str:
-    s = html.unescape(s)
+def clean(s: str) -> str:
+    s = html.unescape(s or "")
     s = re.sub(r"\s+", " ", s).strip()
-    # gereksiz prefixler
-    s = re.sub(r"^\u2022\s*", "", s)  # baştaki bullet
+    # baştaki bullet vs.
+    s = re.sub(r"^[•\u2022\-–—]\s*", "", s)
     return s
 
 def extract_title(doc: BeautifulSoup) -> str:
-    # <h1> veya <title>
-    h1 = doc.find(["h1","h2"])
-    if h1 and h1.get_text(strip=True):
-        return clean_text(h1.get_text())
-    t = doc.find("meta", property="og:title")
-    if t and t.get("content"):
-        return clean_text(t["content"])
+    for sel in [["h1"], ["h2"]]:
+        el = doc.find(sel[0])
+        if el and el.get_text(strip=True):
+            return clean(el.get_text(" ", strip=True))
+    m = doc.find("meta", attrs={"property": "og:title"}) or doc.find("meta", attrs={"name": "og:title"})
+    if m and m.get("content"):
+        return clean(m["content"])
     if doc.title and doc.title.string:
-        return clean_text(doc.title.string)
+        return clean(doc.title.string)
     return ""
 
-def find_ai_summary_block(doc: BeautifulSoup) -> list[str]:
-    """
-    Bundle AI özet kutusundaki maddeleri yakalamaya odaklı esnek seçiciler.
-    Dönüş: madde listesi (string).
-    """
-    # 1) "özetliyor" başlığı yakınındaki <li> maddeleri
-    candidates = []
-    for tag in doc.find_all(text=re.compile(r"Bundle\s*AI|özetliyor", re.I)):
-        # yakınındaki listeleri topla
-        parent = tag.parent
-        for ul in parent.find_all_next(["ul","ol"], limit=2):
-            lis = [clean_text(li.get_text(" ", strip=True)) for li in ul.find_all("li")]
-            if lis:
-                candidates.append(lis)
-                break
-        # bullet paragraf (•) varsa
-        sibs = parent.find_all_next(["p","div"], limit=4)
-        bullets = []
-        for s in sibs:
-            txt = s.get_text(" ", strip=True)
-            if "•" in txt:
-                parts = [clean_text(x) for x in re.split(r"[•\u2022]", txt) if x.strip()]
-                bullets.extend(parts)
-        if bullets:
-            candidates.append(bullets)
-    if candidates:
-        # en dolu olanı seç
-        return max(candidates, key=len)
+def collect_following_texts(anchor) -> list[str]:
+    """'Bundle AI / özetliyor' başlığını bulduktan sonra, yakın takip eden <li>/<p> metinlerini topla."""
+    out = []
+    # En fazla birkaç kardeş blok tarayalım ki saçmalamayalım
+    for sib in anchor.find_all_next(limit=10):
+        # başka bir başlığa geldiysek dur
+        if sib.name in ("h1", "h2", "h3"):
+            break
+        # liste maddeleri
+        if sib.name in ("ul", "ol"):
+            for li in sib.find_all("li"):
+                t = clean(li.get_text(" ", strip=True))
+                if len(t) >= 3:
+                    out.append(t)
+        # paragraflar
+        if sib.name in ("p", "div"):
+            t = clean(sib.get_text(" ", strip=True))
+            if len(t) >= 3:
+                # bullet'lı paragrafı böl
+                parts = [clean(x) for x in re.split(r"[•\u2022]\s*", t) if x.strip()]
+                if parts:
+                    out.extend(parts)
+                else:
+                    out.append(t)
+        # yeterince topladıysak bırak
+        if len(out) >= 6:
+            break
+    # tekrarları temizle
+    dedup = []
+    seen = set()
+    for t in out:
+        if t not in seen:
+            seen.add(t)
+            dedup.append(t)
+    return dedup
 
-    # 2) class adında 'summary' geçen bloklardan liste çıkar
-    for div in doc.find_all(attrs={"class": re.compile("summary", re.I)}):
-        lis = [clean_text(li.get_text(" ", strip=True)) for li in div.find_all("li")]
+def extract_ai_summary(doc: BeautifulSoup) -> list[str]:
+    """Bundle AI 'özetliyor' bloğundaki tüm paragrafları/maddeleri döndür."""
+    # 1) 'özet' içeren başlık/etiketleri yakala
+    # Deprecation fix: string= ile ara
+    anchors = []
+    for tag in doc.find_all(string=re.compile(r"(Bundle\s*AI|özet|özetliyor)", re.I)):
+        if tag.parent:
+            anchors.append(tag.parent)
+
+    for anc in anchors:
+        texts = collect_following_texts(anc)
+        if texts:
+            return texts
+
+    # 2) class/id içinde 'summary' geçen bloklardan topla
+    for div in doc.find_all(attrs={"class": re.compile(r"summary|ai", re.I)}):
+        lis = [clean(li.get_text(" ", strip=True)) for li in div.find_all("li")]
+        lis = [x for x in lis if x]
         if lis:
             return lis
+        ps = [clean(p.get_text(" ", strip=True)) for p in div.find_all("p")]
+        ps = [x for x in ps if x]
+        if ps:
+            return ps
 
-    # yoksa boş
     return []
 
 def fallback_description(doc: BeautifulSoup) -> str:
-    for key in ["og:description","twitter:description","description"]:
+    for key in ("og:description", "twitter:description", "description"):
         m = doc.find("meta", attrs={"property": key}) or doc.find("meta", attrs={"name": key})
         if m and m.get("content"):
-            return clean_text(m["content"])
-    # ilk uzun paragraf
+            return clean(m["content"])
+    # ilk uzun paragrafa düş
     for p in doc.find_all("p"):
-        txt = clean_text(p.get_text(" ", strip=True))
-        if len(txt) > 100:
+        txt = clean(p.get_text(" ", strip=True))
+        if len(txt) > 120:
             return txt
     return ""
 
-def compose_tweet(title: str, bullets: list[str], url: str) -> str:
-    host = urlparse(url).netloc.replace("www.","")
-    tail = f" — kaynak: {host} {url}"
-    room = MAX_TWEET - RESERVE_TCO - len(tail)
-    title = title[:room].rstrip()
+def smart_join(paragraphs: list[str]) -> str:
+    """Paragrafları doğal bir akışla tek paragrafa indir (cümle birleşimi)."""
+    # çok kısa cümleleri birleştir, aşırı tekrarları ele
+    out = []
+    for t in paragraphs:
+        if not t:
+            continue
+        # çok benzer tekrarları at
+        if out and t.lower() == out[-1].lower():
+            continue
+        out.append(t)
+    joined = " ".join(out)
+    # ardışık boşluk temizliği
+    joined = re.sub(r"\s+", " ", joined).strip()
+    return joined
 
-    if bullets:
-        # 2 maddeye kadar, kısa tut
-        use = []
-        for b in bullets:
-            if len(" • " + b) + len(title) + sum(len(" • " + x) for x in use) > room:
-                break
-            use.append(b)
-            if len(use) == 2: break
-        body = (title + "\n" + "\n".join(f"• {b}" for b in use)).strip()
+def natural_truncate(text: str, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    # Noktalama/bosluk sınırında kesmeyi dene
+    cut = text[:max_len]
+    # En yakın doğal sınır: nokta, noktalı virgül, iki nokta, tire, virgül, boşluk
+    m = re.search(r"[\.!?…;:\-–—,]\s+\S*?$", cut)
+    if m:
+        cut = cut[:m.start()].rstrip()
     else:
-        body = title
+        # kelime sınırı
+        if " " in cut:
+            cut = cut[:cut.rfind(" ")].rstrip()
+    return (cut + "…").rstrip()
 
-    # hala uzun ise kısalt
-    if len(body) > room:
-        body = body[:max(0, room-1)].rstrip() + "…"
-
-    return f"{body}{tail}"
+def compose_tweet(full_summary: str, url: str) -> str:
+    host = urlparse(url).netloc.replace("www.", "")
+    tail = f" — Kaynak: {host} {url}"
+    room = MAX_TWEET - len(tail) - 1  # 1 boşluk payı
+    # t.co payını zaten kuyrukta gerçek URL var diye ayrıca TCO_RESERVE eklemiyoruz;
+    # güvenli tarafta kalmak istersen: room -= TCO_RESERVE
+    if room < 60:
+        room = 60  # minimum biraz metin kalsın
+    text = natural_truncate(full_summary, room)
+    return f"{text}{tail}"
 
 def make_tweet_from_bundle(url: str) -> str:
     doc = get_html(url)
     title = extract_title(doc)
-    bullets = find_ai_summary_block(doc)
-    if not bullets:
+    bullets = extract_ai_summary(doc)
+
+    if bullets:
+        full = smart_join(bullets)
+    else:
+        # AI özet bulunamadı; fallback'e düş
         desc = fallback_description(doc)
-        if desc:
-            # desc'i bir maddeye çevir
-            bullets = [desc]
-    if not title and not bullets:
-        raise RuntimeError("Sayfadan özet çekilemedi")
+        if not desc and not title:
+            raise RuntimeError("Sayfadan özet çekilemedi")
+        full = desc or title
 
-    return compose_tweet(title, bullets, url)
+    # Başlık yoksa direkt özet; başlık varsa özet başına ekleyelim mi?
+    # Bundle özet genelde başlığı kapsıyor; gereksiz tekrar olmasın.
+    tweet = compose_tweet(full, url)
+    return tweet
 
+# ---- CLI ----
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True, help="Bundle haber URL")
