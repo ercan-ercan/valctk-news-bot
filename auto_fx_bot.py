@@ -181,9 +181,8 @@ def main():
         return
 
     api = tweepy_client()
-    # Medya yükle + Tweet at
-    media = api.media_upload(filename="fx.jpg", file=img_buf)
-    api.update_status(status=text, media_ids=[media.media_id])
+    # Görsel devre dışı (sadece metin tweet)
+    api.update_status(status=text)
 
 if __name__ == "__main__":
     main()
