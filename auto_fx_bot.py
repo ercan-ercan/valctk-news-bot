@@ -4,14 +4,11 @@
 import os
 import io
 import csv
-import time
-import math
-import textwrap
 import requests
 from datetime import datetime, timedelta, timezone
 
+# ---- Modlar / Kimlikler ----
 DRY = os.environ.get("DRY_MODE", "false").lower() == "true"
-
 API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
@@ -31,15 +28,13 @@ STOOQ_URL = "https://stooq.com/q/l/?s={symbols}&i=d"
 def fetch_stooq_latest(symbols):
     """Stooq list API tek satırlık CSV döndürür. close değerlerini alır."""
     url = STOOQ_URL.format(symbols=",".join(symbols))
-    r = requests.get(url, timeout=10)
+    r = requests.get(url, timeout=12)
     r.raise_for_status()
-    # CSV satırlarını çöz
-    lines = r.text.strip().splitlines()
     out = {}
-    reader = csv.reader(lines)
+    reader = csv.reader(r.text.strip().splitlines())
     for row in reader:
         # Beklenen sıra: Symbol,Date,Time,Open,High,Low,Close,Volume
-        if len(row) < 7: 
+        if len(row) < 7:
             continue
         sym = row[0].strip().lower()
         try:
@@ -50,12 +45,12 @@ def fetch_stooq_latest(symbols):
     return out
 
 def fetch_fx_snapshot():
-    syms = ["usdntry", "eurtry", "gbpntry", "xauusd"]  # gbpntry bazı anlarda yok; sorun değil
+    syms = ["usdntry", "eurtry", "gbptry", "xauusd"]  # GBP sembolü düzeltildi
     data = fetch_stooq_latest(syms)
 
     usd_try = data.get("usdntry")
     eur_try = data.get("eurtry")
-    gbp_try = data.get("gbpntry")  # olmayabilir
+    gbp_try = data.get("gbptry")
     xau_usd = data.get("xauusd")
 
     if not usd_try or not eur_try or not xau_usd:
@@ -65,40 +60,52 @@ def fetch_fx_snapshot():
     gram_altin = (xau_usd * usd_try) / 31.1035
 
     return {
-        "USD/TRY": usd_try,
-        "EUR/TRY": eur_try,
-        "GBP/TRY": gbp_try,          # None olabilir
+        "Dolar": usd_try,
+        "Euro": eur_try,
+        "Pound": gbp_try,          # None olabilir
         "Gram Altın": gram_altin,
         "Ons Altın (USD)": xau_usd,
     }
 
-# ---- Kart görseli (Pillow ile) ----
+# ---- Kart görseli (Pillow) ----
 from PIL import Image, ImageDraw, ImageFont
 
-BG_PATH = os.environ.get("FX_BG_PATH", "assets/fx_bg.jpg")  # repo: assets/fx_bg.jpg
-FONT_PATH = os.environ.get("FX_FONT_PATH")  # opsiyonel; yoksa sistem fontu
 TITLE = "GÜN KAPANIŞI (TL)"
+
+def _resolve_bg_path():
+    """Arka plan dosyasını en iyi adrese göre seç."""
+    candidates = [
+        os.environ.get("BADGE_PATH"),
+        os.environ.get("FX_BG_PATH"),
+        "./guncel_kurlar 1.jpg",           # senin istediğin ad
+        "./assets/assets/fx_bg.jpg",       # repodaki bilinen yol
+        "./fx_bg.jpg",
+        "./fx_card.png",
+    ]
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    raise FileNotFoundError("Arka plan görseli bulunamadı. BADGE_PATH ya da FX_BG_PATH ayarla veya dosyayı repo köküne koy.")
 
 def format_price(x):
     if x is None:
         return "-"
-    # 2 ondalık yeterli (altında 1–2 kuruş oynayabilir)
+    # 2 ondalık, TR yazımı (ondalık virgül)
     return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def build_card(data):
-    # Arkaplan
-    bg = Image.open(BG_PATH).convert("RGB")
-    # 16:9 kırpma (Twitter önizleme dostu)
+    bg_path = _resolve_bg_path()
+    bg = Image.open(bg_path).convert("RGB")
+
+    # 16:9 kırp (Twitter önizleme dostu)
     W, H = bg.size
     target_ratio = 16/9
     cur_ratio = W/H
     if cur_ratio > target_ratio:
-        # fazla geniş → yatay kırp
         new_w = int(H * target_ratio)
         offset = (W - new_w) // 2
         bg = bg.crop((offset, 0, offset + new_w, H))
     else:
-        # fazla uzun → dikey kırp
         new_h = int(W / target_ratio)
         offset = (H - new_h) // 2
         bg = bg.crop((0, offset, W, offset + new_h))
@@ -107,14 +114,9 @@ def build_card(data):
 
     # Yazı tipleri
     try:
-        if FONT_PATH and os.path.exists(FONT_PATH):
-            font_title = ImageFont.truetype(FONT_PATH, 72)
-            font_item  = ImageFont.truetype(FONT_PATH, 56)
-            font_small = ImageFont.truetype(FONT_PATH, 36)
-        else:
-            font_title = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 72)
-            font_item  = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 56)
-            font_small = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 36)
+        font_title = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 72)
+        font_item  = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 56)
+        font_small = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 36)
     except:
         font_title = ImageFont.load_default()
         font_item  = ImageFont.load_default()
@@ -125,7 +127,6 @@ def build_card(data):
     pdraw = ImageDraw.Draw(panel)
     pdraw.rectangle([40,40,bg.width-40,bg.height-40], fill=(0,0,0,120), outline=(255,255,255,140), width=2)
     bg = Image.alpha_composite(bg.convert("RGBA"), panel).convert("RGB")
-
     draw = ImageDraw.Draw(bg)
 
     # Başlık
@@ -134,9 +135,9 @@ def build_card(data):
     y = 170
     step = 85
     items = [
-        ("USD/TRY", data["USD/TRY"]),
-        ("EUR/TRY", data["EUR/TRY"]),
-        ("GBP/TRY", data["GBP/TRY"]),
+        ("Dolar", data["Dolar"]),
+        ("Euro", data["Euro"]),
+        ("Pound", data["Pound"]),
         ("Gram Altın", data["Gram Altın"]),
     ]
     for name, val in items:
@@ -156,10 +157,10 @@ def build_card(data):
     return buf
 
 def build_text(data):
-    # Tweet metni (2 satır, sade)
+    # Tweet metni (2 satır, sade; slash yok)
     parts = [
-        f"USD {format_price(data['USD/TRY'])} • EUR {format_price(data['EUR/TRY'])} • GBP {format_price(data['GBP/TRY'])}",
-        f"Gram altın {format_price(data['Gram Altın'])} TL  •  Ons {format_price(data['Ons Altın (USD)'])} $",
+        "Güncel Kurlar:",
+        f"• Dolar: {format_price(data['Dolar'])}   Euro: {format_price(data['Euro'])}   Pound: {format_price(data['Pound'])}",
     ]
     return "\n".join(parts)
 
@@ -180,10 +181,8 @@ def main():
         return
 
     api = tweepy_client()
-
-    # Medya yükle
+    # Medya yükle + Tweet at
     media = api.media_upload(filename="fx.jpg", file=img_buf)
-    # Tweet at
     api.update_status(status=text, media_ids=[media.media_id])
 
 if __name__ == "__main__":
