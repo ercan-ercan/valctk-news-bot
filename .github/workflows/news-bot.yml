@@ -26,7 +26,7 @@ jobs:
       # ---- SANITY CHECKS ----
       - name: Sanity checks (files & badge)
         env:
-          BADGE_PATH: ./guncel_kurlar_small.jpg   # repo kökünde olmalı; adı farklıysa değiştir
+          BADGE_PATH: ./guncel_kurlar 1.jpg   # repo kökünde olmalı; adı farklıysa değiştir
         run: |
           echo "Python: $(python --version)"
           echo "PWD: $(pwd)"
@@ -51,7 +51,7 @@ jobs:
           ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
           ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
           BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
-          BADGE_PATH: ./guncel_kurlar_small.jpg
+          BADGE_PATH: ./guncel_kurlar 1.jpg
         run: |
           set -e
           python -u auto_fx_bot.py
