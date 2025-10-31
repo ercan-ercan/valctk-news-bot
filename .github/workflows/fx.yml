@@ -2,7 +2,7 @@ name: FX Tweet (Daily 18:00 TRT)
 
 on:
   schedule:
-    - cron: "0 15 * * *"   # 15:00 UTC = 18:00 Türkiye saati
+    - cron: "0 15 * * *"   # 18:00 Türkiye saati
   workflow_dispatch:
 
 jobs:
@@ -20,29 +20,14 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests tweepy pillow
+          pip install requests tweepy
 
-      - name: Sanity checks (files & badge)
-        env:
-          BADGE_PATH: "./guncel_kurlar 1.jpg"
-        run: |
-          echo "PWD: $(pwd)"
-          ls -lah
-          test -f auto_fx_bot.py || (echo "::error file=auto_fx_bot.py::auto_fx_bot.py repo kökünde yok"; exit 1)
-          if [ -f "$BADGE_PATH" ]; then
-            echo "BADGE_PATH OK: $BADGE_PATH"
-            du -h "$BADGE_PATH"
-          else
-            echo "::warning::BADGE_PATH bulunamadı: $BADGE_PATH (görsel olmadan metin tweet denerim)"
-          fi
-
-      - name: Run bot (media mode)
+      - name: Run bot (text only)
         env:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
           ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
           ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
           BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
-          BADGE_PATH: "./guncel_kurlar 1.jpg"
         run: |
           python -u auto_fx_bot.py
