@@ -1,3 +1,4 @@
+cat > auto_fx_bot.py <<'PY'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -7,32 +8,25 @@ import requests
 from datetime import datetime, timedelta, timezone
 import tweepy
 
-# --- Modlar ---
 DRY = os.environ.get("DRY_MODE", "false").lower() == "true"
 
-# --- Twitter API anahtarları ---
 API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 ACCESS_TOKEN_SECRET = os.environ.get("ACCESS_TOKEN_SECRET")
 
-# --- Tweepy bağlan ---
 def tweepy_client():
     auth = tweepy.OAuth1UserHandler(API_KEY, API_SECRET, ACCESS_TOKEN, ACCESS_TOKEN_SECRET)
     return tweepy.API(auth)
 
-# --- Veri kaynağı (Stooq) ---
 STOOQ_URL = "https://stooq.com/q/l/?s={symbols}&i=d"
 
 def fetch_stooq_latest(symbols):
-    """Stooq list API tek satırlık CSV döndürür. close değerlerini alır."""
     url = STOOQ_URL.format(symbols=",".join(symbols))
     r = requests.get(url, timeout=10)
     r.raise_for_status()
-    lines = r.text.strip().splitlines()
     out = {}
-    reader = csv.reader(lines)
-    for row in reader:
+    for row in csv.reader(r.text.strip().splitlines()):
         if len(row) < 7:
             continue
         sym = row[0].strip().lower()
@@ -46,18 +40,13 @@ def fetch_stooq_latest(symbols):
 def fetch_fx_snapshot():
     syms = ["usdntry", "eurtry", "gbpntry", "xauusd"]
     data = fetch_stooq_latest(syms)
-
     usd_try = data.get("usdntry")
     eur_try = data.get("eurtry")
     gbp_try = data.get("gbpntry")
     xau_usd = data.get("xauusd")
-
     if not usd_try or not eur_try or not xau_usd:
         raise RuntimeError("Kurlar alınamadı (Stooq)")
-
-    # Gram altın ≈ ons altın(USD) * USD/TRY / 31.1035
     gram_altin = (xau_usd * usd_try) / 31.1035
-
     return {
         "Dolar": usd_try,
         "Euro": eur_try,
@@ -66,13 +55,11 @@ def fetch_fx_snapshot():
         "Ons Altın (USD)": xau_usd,
     }
 
-# --- Formatlama ---
 def format_price(x):
     if x is None:
         return "-"
     return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-# --- Tweet metni oluştur ---
 def build_text(data):
     lines = [
         "Güncel Kurlar:",
@@ -85,7 +72,6 @@ def build_text(data):
     ]
     return "\n".join(lines)
 
-# --- Ana akış ---
 def main():
     try:
         data = fetch_fx_snapshot()
@@ -105,6 +91,6 @@ def main():
     api.update_status(status=text)
     print("✅ Tweet gönderildi.")
 
-# --- Çalıştır ---
 if __name__ == "__main__":
     main()
+PY
