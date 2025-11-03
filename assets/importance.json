@@ -1,0 +1,12 @@
+{
+  "positive": ["açıkladı","zam","enflasyon","bütçe","vergi","meclis","mahkeme","tutuklama","karar","resmi","tebliğ","yönetmelik","merkez bankası","faiz","ihracat","ithalat","rekor","yatırım","deprem","acil","uyarı","döviz"],
+  "negative": ["magazin","influencer","çekiliş","hediye","story","trend","like","rt","video izle","yayında","canlı yayın"],
+  "categories": {
+    "ekonomi": ["enflasyon","faiz","vergi","bütçe","zam","döviz","kur","ihracat","ithalat","TÜİK","MB"],
+    "siyaset": ["cumhurbaşkanı","bakan","meclis","kanun","kararname","parti","seçim"],
+    "yargı": ["mahkeme","yargıtay","danıştay","savcılık","tutuklandı","dava","iddianame"],
+    "güvenlik": ["operasyon","saldırı","terör","gözaltı","yakalandı"],
+    "teknoloji": ["yapay zeka","uydu","roket","savunma","Ar-Ge","girişim","yatırım"]
+  },
+  "score_threshold": 60
+}

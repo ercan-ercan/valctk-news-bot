@@ -1,0 +1,13 @@
+official:
+  - handle: anadoluajansi
+    display: Anadolu Ajansı
+
+unofficial:
+  - handle: darkwebhaber
+    display: Dark Web Haber
+  - handle: bosunatiklama
+    display: Boşuna Tıklama
+  - handle: pusholder
+    display: Pusholder
+  - handle: Haber
+    display: Haber
