@@ -1,9 +1,9 @@
 name: Valctk Haber Bot (Every 39 Minutes)
 
 on:
+  workflow_dispatch:        # MANUEL ÇALIŞTIRMA BUTONU
   schedule:
-    - cron: "*/39 * * * *"
-  workflow_dispatch:
+    - cron: "*/39 * * * *"  # her 39 dakikada bir
 
 jobs:
   run-bot:
