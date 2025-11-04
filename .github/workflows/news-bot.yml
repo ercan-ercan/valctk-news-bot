@@ -2,7 +2,7 @@ name: Valctk Haber Bot (Every 39 Minutes)
 
 on:
   schedule:
-    - cron: "*/39 * * * *"   # her 39 dakikada bir
+    - cron: "*/39 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -28,7 +28,6 @@ jobs:
           python3 -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # İsteğe bağlı ama tavsiye: Secrets doğru mu hızlı kontrol
       - name: Preflight: verify X credentials (v2 + v1.1)
         env:
           TW_API_KEY: ${{ secrets.TW_API_KEY }}
@@ -37,24 +36,24 @@ jobs:
           TW_ACCESS_SECRET: ${{ secrets.TW_ACCESS_SECRET }}
         run: |
           python3 - <<'PY'
-          import os, sys, tweepy
+          import os, tweepy, sys
           ck, cs = os.getenv("TW_API_KEY"), os.getenv("TW_API_SECRET")
           at, ase = os.getenv("TW_ACCESS_TOKEN"), os.getenv("TW_ACCESS_SECRET")
           miss=[k for k,v in {"TW_API_KEY":ck,"TW_API_SECRET":cs,"TW_ACCESS_TOKEN":at,"TW_ACCESS_SECRET":ase}.items() if not v]
           if miss:
               print("Missing secrets:", miss); sys.exit(1)
-          # v2 (create_tweet) testi
+          # v2 testi
           c = tweepy.Client(consumer_key=ck, consumer_secret=cs, access_token=at, access_token_secret=ase)
           me = c.get_me()
           print("v2 OK, user:", getattr(me.data, "username", None))
-          # v1.1 (media upload) testi
+          # v1.1 testi
           try:
-            auth = tweepy.OAuth1UserHandler(ck, cs, at, ase)
-            api = tweepy.API(auth)
-            u = api.verify_credentials()
-            print("v1.1 OK, screen_name:", getattr(u, "screen_name", None))
+              auth = tweepy.OAuth1UserHandler(ck, cs, at, ase)
+              api = tweepy.API(auth)
+              u = api.verify_credentials()
+              print("v1.1 OK, screen_name:", getattr(u, "screen_name", None))
           except Exception as e:
-            print("v1.1 WARN:", repr(e))  # medya başarısızsa bile bot çalışsın
+              print("v1.1 WARN:", repr(e))
           PY
 
       - name: Run bot
@@ -64,8 +63,7 @@ jobs:
           TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
           TW_ACCESS_SECRET: ${{ secrets.TW_ACCESS_SECRET }}
           DRY_MODE: "false"
-          # Geçici: medya upload (v1.1) sıkıntı varsa kapat. Düzelince "true" yaparsın.
-          ATTACH_OG_IMAGE: "false"
+          ATTACH_OG_IMAGE: "false"   # geçici: medya upload’ı kapalı
         run: |
           cd ${{ github.workspace }}
           ls -la
