@@ -42,11 +42,9 @@ jobs:
           miss=[k for k,v in {"TW_API_KEY":ck,"TW_API_SECRET":cs,"TW_ACCESS_TOKEN":at,"TW_ACCESS_SECRET":ase}.items() if not v]
           if miss:
               print("Missing secrets:", miss); sys.exit(1)
-          # v2 testi
           c = tweepy.Client(consumer_key=ck, consumer_secret=cs, access_token=at, access_token_secret=ase)
           me = c.get_me()
           print("v2 OK, user:", getattr(me.data, "username", None))
-          # v1.1 testi
           try:
               auth = tweepy.OAuth1UserHandler(ck, cs, at, ase)
               api = tweepy.API(auth)
