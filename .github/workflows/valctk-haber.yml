@@ -1,4 +1,4 @@
-name: Valctk Haber Bot
+name: Valctk Haber Bot (Every 39 Minutes)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,79 @@ on:
     - cron: "*/39 * * * *"
 
 jobs:
-  ping:
+  run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: valctk-haber-bot
+      cancel-in-progress: false
+
     steps:
-      - run: echo OK
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Preflight credentials (v2 + v1.1)
+        env:
+          TW_API_KEY: ${{ secrets.TW_API_KEY }}
+          TW_API_SECRET: ${{ secrets.TW_API_SECRET }}
+          TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
+          TW_ACCESS_SECRET: ${{ secrets.TW_ACCESS_SECRET }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          import tweepy
+
+          ck  = os.getenv("TW_API_KEY")
+          cs  = os.getenv("TW_API_SECRET")
+          at  = os.getenv("TW_ACCESS_TOKEN")
+          ase = os.getenv("TW_ACCESS_SECRET")
+
+          missing = [k for k,v in {
+              "TW_API_KEY": ck, "TW_API_SECRET": cs,
+              "TW_ACCESS_TOKEN": at, "TW_ACCESS_SECRET": ase
+          }.items() if not v]
+          if missing:
+              print("Missing secrets:", missing)
+              sys.exit(1)
+
+          # v2 test
+          try:
+              c = tweepy.Client(consumer_key=ck, consumer_secret=cs,
+                                access_token=at, access_token_secret=ase)
+              me = c.get_me()
+              print("v2 OK user:", getattr(me.data, "username", None))
+          except Exception as e:
+              print("v2 ERROR:", e)
+
+          # v1.1 test (media upload)
+          try:
+              auth = tweepy.OAuth1UserHandler(ck, cs, at, ase)
+              api = tweepy.API(auth)
+              u = api.verify_credentials()
+              print("v1.1 OK screen_name:", getattr(u, "screen_name", None))
+          except Exception as e:
+              print("v1.1 WARN:", e)  # medya hatası olsa bile devam
+          PY
+
+      - name: Run bot
+        env:
+          TW_API_KEY: ${{ secrets.TW_API_KEY }}
+          TW_API_SECRET: ${{ secrets.TW_API_SECRET }}
+          TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
+          TW_ACCESS_SECRET: ${{ secrets.TW_ACCESS_SECRET }}
+          DRY_MODE: "false"
+          ATTACH_OG_IMAGE: "false"   # medya sorununu çözene kadar false
+        run: |
+          ls -la
+          python3 -u auto_repost_bot.py
