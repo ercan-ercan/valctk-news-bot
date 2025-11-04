@@ -1,340 +1,347 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# auto_repost_bot.py
+# 39Dakika: RSS -> (rewrite) -> X paylaşım (opsiyonel görsel)
+# Gereken pip: tweepy, requests, beautifulsoup4, lxml, rapidfuzz, unidecode
 
-"""
-Valctk-Haber • Auto Repost Bot
-- X API v2 (tweet), v1.1 (media upload)
-- Link YOK (kart yok)
-- RSS kaynağı + (opsiyonel) belirli X hesaplarından içerik çekme
-- Başlık/Tweet metnini parlatır, özet ekler, noktalama tamamlar
-"""
-
-import os, sys, json, argparse, tempfile, time
-from typing import List, Dict, Optional
+import os, json, time, re, tempfile
+from typing import List, Dict, Optional, Tuple
+from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
-from rapidfuzz import fuzz, process
+from lxml import etree
+import tweepy
 from unidecode import unidecode
 
-# ====== AYARLAR ======
-RSS_SOURCES = [
-    "https://www.trthaber.com/manset_articles.rss",
-    "https://www.aa.com.tr/tr/rss/default?cat=guncel",
-    "https://www.hurriyet.com.tr/rss/anasayfa",
-]
+# ------------------ Ayarlar / Env ------------------
 
-STATE_DIR = ".state"
-STATE_FILE = os.path.join(STATE_DIR, "posted.json")
-SIMILARITY_THRESHOLD = 90
-MAX_TWEET_LEN = 280
+DRY_MODE = os.getenv("DRY_MODE", "false").lower() in ("1","true","yes")
+ATTACH_OG_IMAGE = os.getenv("ATTACH_OG_IMAGE", "true").lower() in ("1","true","yes")
 
-# Paylaşım davranışı
-ATTACH_OG_IMAGE   = os.getenv("ATTACH_OG_IMAGE", "true").lower() in ("1","true","yes")
-OG_IMAGE_TIMEOUT  = 12
-HTTP_TIMEOUT      = 15
+TW_API_KEY     = os.getenv("TW_API_KEY")
+TW_API_SECRET  = os.getenv("TW_API_SECRET")
+TW_ACCESS_TOKEN = os.getenv("TW_ACCESS_TOKEN")
+TW_ACCESS_SECRET= os.getenv("TW_ACCESS_SECRET")
 
-# X kaynaklarından çekme (opsiyonel)
-ENABLE_X_SOURCES  = os.getenv("ENABLE_X_SOURCES", "false").lower() in ("1","true","yes")
-X_HANDLES = [h.strip().lstrip("@") for h in (os.getenv("X_HANDLES","").split(",")) if h.strip()]
+RSS_FILE   = "rss_sources.txt"   # satır başına 1 RSS URL
+STATE_FILE = "state.json"        # {"posted": ["url1", "url2", ...]}
 
-END_OK = (".", "?", "!", "…", ".”", "!”", "?”", ")", "»", "”")
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; 39DakikaBot/1.0; +https://twitter.com/39Dakika)"
+}
+TIMEOUT = 15
 
-# ====== State ======
-def ensure_state():
-    os.makedirs(STATE_DIR, exist_ok=True)
-    if not os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"links": [], "titles": [], "tweet_ids": [], "user_ids": {}}, f, ensure_ascii=False)
+# ------------------ Yardımcılar ------------------
 
 def load_state() -> Dict:
-    ensure_state()
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"posted": []}
 
 def save_state(state: Dict):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, STATE_FILE)
 
-def sha1(s: str) -> str:
-    import hashlib
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
-
-def normalize_text(s: str) -> str:
-    return unidecode(" ".join((s or "").split()))
-
-# ====== Metin parlatma ======
-def ensure_sentence_end(t: str) -> str:
-    t = (t or "").strip()
-    if not any(t.endswith(p) for p in END_OK):
-        t += "."
-    return t
-
-def polish_sentence(t: str) -> str:
-    t = " ".join((t or "").strip().split())
-    if t and not t.isupper():
-        try: t = t[0].upper() + t[1:]
-        except Exception: pass
-    t = ensure_sentence_end(t)
-    return t
-
-def clean_html_to_text(html_or_text: str) -> str:
+def read_lines(path: str) -> List[str]:
     try:
-        soup = BeautifulSoup(html_or_text, "lxml")
-        text = soup.get_text(" ", strip=True)
-        return " ".join(text.split())
-    except Exception:
-        return " ".join(str(html_or_text).split())
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
+        return lines
+    except FileNotFoundError:
+        return []
 
-def compose_with_summary(title_or_text: str, summary: Optional[str]) -> str:
-    base = polish_sentence(title_or_text)
-    if not summary:
-        return base[:MAX_TWEET_LEN] if len(base) > MAX_TWEET_LEN else base
-    s = polish_sentence(clean_html_to_text(summary))
-    room = MAX_TWEET_LEN - (len(base) + 1)
-    if room <= 0:
-        return base[:MAX_TWEET_LEN]
-    if len(s) > room:
-        s = s[:max(0, room - 1)].rstrip()
-        if not s.endswith("…"): s += "…"
-    return f"{base} {s}"
+def shorten_whitespace(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
 
-# ====== RSS ======
-def fetch_rss(url: str):
-    items = []
-    try:
-        r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "ValctkBot/1.0"})
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "xml")
-        for it in soup.find_all("item"):
-            title = (it.title.text if it.title else "").strip()
-            link = (it.link.text if it.link else "").strip()
-            desc = ""
-            if it.find("description"): desc = it.find("description").text or ""
-            if title and link:
-                items.append({"title": title, "link": link, "desc": desc})
-    except Exception as e:
-        print(f"[WARN] RSS çekilemedi: {url} -> {e}")
-    return items
+def ensure_period(s: str) -> str:
+    s = s.strip()
+    if not s:
+        return s
+    if s[-1] not in ".!?":
+        return s + "."
+    return s
 
-def collect_rss_candidates() -> List[Dict]:
-    all_items = []
-    for src in RSS_SOURCES: all_items.extend(fetch_rss(src))
-    seen, uniq = set(), []
-    for it in all_items:
-        if it["link"] in seen: continue
-        seen.add(it["link"]); uniq.append(it)
-    return uniq
+def sentence_case_tr(s: str) -> str:
+    s = shorten_whitespace(s)
+    if not s:
+        return s
+    # İlk harfi büyüt (Türkçe karakterleri koruyarak)
+    return s[0].upper() + s[1:]
 
-def is_duplicate_title(title: str, state: Dict) -> bool:
-    cand = normalize_text(title)
-    hist = state.get("titles", [])
-    if hist:
-        best = process.extractOne(cand, hist, scorer=fuzz.token_set_ratio)
-        if best and best[1] >= SIMILARITY_THRESHOLD:
-            return True
-    return False
+def dedup_list_keep_order(seq: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
 
-# ====== Sayfa yardımcıları ======
-def extract_page_summary(html: str) -> Optional[str]:
-    soup = BeautifulSoup(html, "lxml")
-    for key in (
-        {"name": "description"},
-        {"property": "description"},
-        {"property": "og:description"},
-        {"name": "og:description"},
-        {"name": "twitter:description"},
-        {"property": "twitter:description"},
-    ):
-        tag = soup.find("meta", attrs=key)
-        if tag and tag.get("content"): return tag["content"].strip()
-    p = soup.find("p")
-    if p: return p.get_text(" ", strip=True)
-    return None
+# ------------------ Twitter Clients ------------------
 
-def find_og_image_url(html: str) -> Optional[str]:
-    soup = BeautifulSoup(html, "lxml")
-    for prop in ("og:image", "og:image:url", "twitter:image"):
-        el = soup.find("meta", attrs={"property": prop}) or soup.find("meta", attrs={"name": prop})
-        if el and el.get("content"): return el["content"].strip()
-    img = soup.find("img")
-    return img.get("src").strip() if img and img.get("src") else None
-
-def absolutize(base: str, maybe: str) -> str:
-    if maybe.startswith("//"): return "https:" + maybe
-    if maybe.startswith("/"):
-        from urllib.parse import urljoin
-        return urljoin(base, maybe)
-    return maybe
-
-def get_article_summary_and_image(article_url: str):
-    try:
-        r = requests.get(article_url, timeout=OG_IMAGE_TIMEOUT, headers={"User-Agent": "ValctkBot/1.0"})
-        r.raise_for_status()
-        html = r.text
-        summary = extract_page_summary(html)
-        og = find_og_image_url(html)
-        img_url = absolutize(article_url, og) if og else None
-        return summary, img_url
-    except Exception as e:
-        print("[WARN] Makale meta alınamadı:", e)
-        return None, None
-
-def download_image(url: str) -> Optional[str]:
-    try:
-        r = requests.get(url, timeout=OG_IMAGE_TIMEOUT, headers={"User-Agent": "ValctkBot/1.0"})
-        r.raise_for_status()
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-        tmp.write(r.content); tmp.close()
-        return tmp.name
-    except Exception as e:
-        print("[WARN] Görsel indirilemedi:", e)
-        return None
-
-# ====== X API ======
-def get_client_v2():
-    import tweepy
+def get_client_v2() -> tweepy.Client:
     return tweepy.Client(
-        consumer_key=os.getenv("TW_API_KEY"),
-        consumer_secret=os.getenv("TW_API_SECRET"),
-        access_token=os.getenv("TW_ACCESS_TOKEN"),
-        access_token_secret=os.getenv("TW_ACCESS_SECRET"),
+        consumer_key=TW_API_KEY,
+        consumer_secret=TW_API_SECRET,
+        access_token=TW_ACCESS_TOKEN,
+        access_token_secret=TW_ACCESS_SECRET,
         wait_on_rate_limit=True,
     )
 
-def get_api_v1():
-    import tweepy
-    auth = tweepy.OAuth1UserHandler(
-        os.getenv("TW_API_KEY"),
-        os.getenv("TW_API_SECRET"),
-        os.getenv("TW_ACCESS_TOKEN"),
-        os.getenv("TW_ACCESS_SECRET"),
-    )
+def get_api_v1() -> tweepy.API:
+    auth = tweepy.OAuth1UserHandler(TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET)
     return tweepy.API(auth, wait_on_rate_limit=True)
 
-def upload_media(image_path: str) -> Optional[str]:
+# ------------------ RSS Okuma ------------------
+
+def fetch(url: str) -> Optional[requests.Response]:
     try:
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        if r.status_code == 200 and r.content:
+            return r
+    except Exception:
+        pass
+    return None
+
+def parse_rss_items(xml_bytes: bytes) -> List[Dict]:
+    """
+    Basit RSS/Atom parser (feedparser’sız).
+    Dönen her item: {"title": ..., "link": ..., "summary": ...}
+    """
+    items: List[Dict] = []
+    try:
+        root = etree.fromstring(xml_bytes)
+    except Exception:
+        return items
+
+    ns = root.nsmap or {}
+    # RSS (item) veya Atom (entry) desteği
+    rss_items = root.findall(".//item")
+    atom_items = root.findall(".//{http://www.w3.org/2005/Atom}entry")
+    if rss_items:
+        for it in rss_items:
+            title = "".join(it.findtext("title") or "").strip()
+            link  = (it.findtext("link") or "").strip()
+            desc  = "".join(it.findtext("description") or "").strip()
+            if not link:
+                # bazı RSS’ler linki <guid>’da taşır
+                link = (it.findtext("guid") or "").strip()
+            if title and link:
+                items.append({"title": title, "link": link, "summary": desc})
+    elif atom_items:
+        for it in atom_items:
+            title = "".join(it.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
+            link_el = it.find("{http://www.w3.org/2005/Atom}link")
+            link = ""
+            if link_el is not None:
+                link = link_el.attrib.get("href", "").strip()
+            summary = "".join(it.findtext("{http://www.w3.org/2005/Atom}summary") or "").strip()
+            if title and link:
+                items.append({"title": title, "link": link, "summary": summary})
+    return items
+
+def gather_candidates() -> List[Dict]:
+    urls = read_lines(RSS_FILE)
+    all_items: List[Dict] = []
+    for u in urls:
+        r = fetch(u)
+        if not r: 
+            continue
+        items = parse_rss_items(r.content)
+        for it in items:
+            # bazı linkler takip etmeye değmez (kısaltıcılar vs.)
+            if it.get("link", "").startswith(("javascript:", "mailto:")):
+                continue
+            all_items.append(it)
+    # Aynı linkleri ayıkla (ilk gelen kazansın)
+    uniq = []
+    seen = set()
+    for it in all_items:
+        lk = it.get("link", "")
+        if lk and lk not in seen:
+            seen.add(lk)
+            uniq.append(it)
+    return uniq
+
+# ------------------ Rewrite (Türkçe) ------------------
+
+PUNCT_FIX = re.compile(r"\s+([,.!?;:])")
+SPACE_FIX = re.compile(r"\s+")
+
+def clean_text(s: str) -> str:
+    s = BeautifulSoup(s or "", "lxml").get_text(" ")
+    s = SPACE_FIX.sub(" ", s).strip()
+    s = PUNCT_FIX.sub(r"\1", s)
+    return s
+
+def smart_join_sentences(parts: List[str]) -> str:
+    parts = [ensure_period(p.strip()) for p in parts if p and p.strip()]
+    text = " ".join(parts)
+    # Fazla boşluk/punktüasyon düzelt
+    text = clean_text(text)
+    # İlk harfi büyüt
+    if text:
+        text = sentence_case_tr(text)
+    return text
+
+def rewrite_tr(title: str, summary: str) -> str:
+    """
+    Basit ama kaliteli: başlığı doğal dille, özetini ikinci cümle gibi.
+    Fazla tekrarları ve gereksiz uzunluğu kırpar.
+    """
+    t = clean_text(title)
+    s = clean_text(summary)
+
+    # Başlıktaki kırpılabilir süsler
+    t = re.sub(r"^\s*(SON DAKİKA[:\-–]?)\s*", "", t, flags=re.I)
+    t = re.sub(r"\s*\|\s*.+$", "", t)  # site adı vb.
+
+    # Özet çok başlığı tekrar ediyorsa özetini at
+    if s and unidecode(s.lower()).startswith(unidecode(t.lower())[:60]):
+        s = ""
+
+    # Başlığı cümle yap
+    t = ensure_period(t)
+    # Özet varsa tek-iki cümleye indir
+    if s:
+        # parantez içi/URL kırp
+        s = re.sub(r"\(.*?\)", "", s)
+        s = re.sub(r"http\S+", "", s)
+        # çok uzunsa ilk cümlecik
+        parts = re.split(r"(?<=[.!?])\s+", s)
+        s = parts[0].strip()
+        s = ensure_period(s)
+
+    text = smart_join_sentences([t, s])
+    # Çok uzunsa X limitine yaklaş (280)
+    if len(text) > 260:
+        text = text[:257].rstrip() + "..."
+    return text
+
+# ------------------ OG Görsel ------------------
+
+def extract_og_image(url: str) -> Optional[str]:
+    r = fetch(url)
+    if not r:
+        return None
+    try:
+        soup = BeautifulSoup(r.text, "lxml")
+        og = soup.find("meta", attrs={"property": "og:image"}) or \
+             soup.find("meta", attrs={"name": "og:image"})
+        if og and og.get("content"):
+            img = og["content"].strip()
+            # bazı siteler relatif döner
+            if img.startswith("//"):
+                img = "https:" + img
+            return img
+    except Exception:
+        pass
+    return None
+
+def download_temp(url: str) -> Optional[str]:
+    try:
+        rr = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        if rr.status_code == 200 and rr.content:
+            fd, path = tempfile.mkstemp(prefix="img_", suffix=".jpg")
+            os.close(fd)
+            with open(path, "wb") as f:
+                f.write(rr.content)
+            return path
+    except Exception:
+        pass
+    return None
+
+def try_upload_media(image_url: str) -> Optional[str]:
+    try:
+        path = download_temp(image_url)
+        if not path:
+            return None
         api = get_api_v1()
-        media = api.media_upload(filename=image_path)
-        return media.media_id_string
+        up = api.media_upload(path)
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+        return getattr(up, "media_id_string", None) or str(getattr(up, "media_id", ""))
     except Exception as e:
         print("[WARN] Medya yüklenemedi:", e)
         return None
 
-# ----- X kaynakları (timeline çekme) -----
-def get_user_id(client, username: str, cache: Dict) -> Optional[str]:
-    if "user_ids" not in cache: cache["user_ids"] = {}
-    if username in cache["user_ids"]: return cache["user_ids"][username]
-    u = client.get_user(username=username)
-    uid = str(u.data.id) if u and u.data else None
-    if uid: cache["user_ids"][username] = uid
-    return uid
+# ------------------ Tweet At ------------------
 
-def fetch_latest_tweet_texts(client, usernames: List[str], state: Dict) -> List[Dict]:
-    out = []
-    for uname in usernames:
-        uid = get_user_id(client, uname, state)
-        if not uid: continue
-        tw = client.get_users_tweets(
-            id=uid, max_results=5,
-            exclude=["replies", "retweets"],
-            tweet_fields=["created_at", "lang", "entities"]
-        )
-        if not tw or not tw.data: continue
-        for t in tw.data:
-            tid = str(t.id)
-            if tid in state.get("tweet_ids", []): continue
-            text = (t.text or "").strip()
-            if not text: continue
-            out.append({"source":"x", "username": uname, "tweet_id": tid, "title": text, "link": f"https://x.com/{uname}/status/{tid}"})
-            break
-    return out
-
-# ====== Tweet gönderme ======
-def post_tweet(text: str, image_url: Optional[str], dry: bool):
-    if dry:
-        print(f"[DRY] Tweet (link yok):\n{text}\nimage={bool(image_url)}")
-        return
-
-    media_ids = None
-    if image_url and ATTACH_OG_IMAGE:
-        path = download_image(image_url)
-        if path:
-            mid = upload_media(path)
-            if mid: media_ids = [mid]
-            try: os.unlink(path)
-            except Exception: pass
+def post_tweet(text: str, image_url: Optional[str]) -> Optional[str]:
+    if DRY_MODE:
+        print("[DRY] Tweet atılacak (görsel={}):\n{}".format(bool(image_url), text))
+        return "DRY"
 
     client = get_client_v2()
-    if media_ids:
-        resp = client.create_tweet(text=text, media_ids=media_ids)
-    else:
-        resp = client.create_tweet(text=text)
-    tid = getattr(resp, "data", {}).get("id")
-    print(f"[OK] Tweet gönderildi. ID: {tid}")
 
-# ====== Akış ======
-def choose_candidate(state: Dict) -> Optional[Dict]:
-    # Önce RSS
-    rss = collect_rss_candidates()
-    for it in rss:
-        if sha1(it["link"]) in state.get("links", []): continue
-        if is_duplicate_title(it["title"], state): continue
-        return {"source":"rss", **it}
+    media_ids = None
+    if ATTACH_OG_IMAGE and image_url:
+        mid = try_upload_media(image_url)
+        if mid:
+            media_ids = [mid]
+        else:
+            print("[WARN] Görsel eklenemedi, metinle devam.")
 
-    # Sonra X kaynakları (opsiyonel)
-    if ENABLE_X_SOURCES and X_HANDLES:
-        client = get_client_v2()
-        arr = fetch_latest_tweet_texts(client, X_HANDLES, state)
-        for it in arr:
-            if is_duplicate_title(it["title"], state): continue
+    try:
+        if media_ids:
+            resp = client.create_tweet(text=text, media_ids=media_ids)
+        else:
+            resp = client.create_tweet(text=text)
+        tid = getattr(resp, "data", {}).get("id")
+        print(f"[OK] Tweet gönderildi. ID: {tid}")
+        return tid
+    except Exception as e:
+        print("Error:", e)
+        return None
+
+# ------------------ Ana Akış ------------------
+
+def choose_unposted(candidates: List[Dict], posted: List[str]) -> Optional[Dict]:
+    for it in candidates:
+        link = it.get("link", "")
+        if link and link not in posted:
             return it
     return None
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dry", action="store_true")
-    args = parser.parse_args()
-
-    dry = args.dry or (os.getenv("DRY_MODE", "").lower() in ("1","true","yes"))
     state = load_state()
+    posted = state.get("posted", [])
 
-    cand = choose_candidate(state)
-    if not cand:
-        print("⚠️ Paylaşılacak yeni içerik bulunamadı.")
+    candidates = gather_candidates()
+    if not candidates:
+        print("[INFO] RSS boş ya da ulaşılamıyor.")
         return
 
-    if cand["source"] == "rss":
-        # RSS: başlık + kısa özet + (og:image)
-        rss_summary = clean_html_to_text(cand.get("desc") or "")
-        page_summary, img_url = (None, None)
-        if not rss_summary or ATTACH_OG_IMAGE:
-            s, iu = get_article_summary_and_image(cand["link"])
-            page_summary = s if not rss_summary else rss_summary
-            img_url = iu
-        text = compose_with_summary(cand["title"], rss_summary or page_summary)
-        post_tweet(text=text, image_url=img_url, dry=dry)
+    item = choose_unposted(candidates, posted)
+    if not item:
+        print("[INFO] Yeni içerik yok.")
+        return
 
-        # state güncelle
-        state["links"] = list({*state.get("links", []), sha1(cand["link"])})
-        titles = state.get("titles", []); titles.append(normalize_text(cand["title"]))
-        state["titles"] = titles[-500:]
+    title = item.get("title") or ""
+    summary = item.get("summary") or ""
+    link = item.get("link") or ""
 
-    else:  # X kaynağı
-        text = compose_with_summary(cand["title"], None)
-        post_tweet(text=text, image_url=None, dry=dry)
+    text = rewrite_tr(title, summary)
+    # Link istemiyorsun demiştin; tweet metninde link yok.
+    # (İleride istersen sonuna kısaltılmış link ekleriz.)
 
-        tids = state.get("tweet_ids", [])
-        tids.append(cand["tweet_id"])
-        state["tweet_ids"] = tids[-1000:]
-        titles = state.get("titles", []); titles.append(normalize_text(cand["title"]))
-        state["titles"] = titles[-500:]
+    image_url = extract_og_image(link)
 
-    save_state(state)
+    tid = post_tweet(text, image_url)
+
+    # Başarılıysa state’e ekle
+    if tid:
+        posted.append(link)
+        state["posted"] = dedup_list_keep_order(posted)[-1000:]  # şişmesin
+        save_state(state)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n[!] İptal edildi.")
-    except Exception as e:
-        print(f"[ERROR] {e}"); sys.exit(1)
+    # hızlı env test
+    miss = [k for k in ("TW_API_KEY","TW_API_SECRET","TW_ACCESS_TOKEN","TW_ACCESS_SECRET") if not os.getenv(k)]
+    if miss:
+        print("[WARN] Eksik env:", miss)
+    main()
