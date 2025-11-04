@@ -29,7 +29,7 @@ SIMILARITY_THRESHOLD = 90
 MAX_TWEET_LEN = 280
 
 # Paylaşım davranışı
-ATTACH_OG_IMAGE   = True      # RSS makalesi için og:image ekle
+ATTACH_OG_IMAGE   = os.getenv("ATTACH_OG_IMAGE", "true").lower() in ("1","true","yes")
 OG_IMAGE_TIMEOUT  = 12
 HTTP_TIMEOUT      = 15
 
