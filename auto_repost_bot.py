@@ -1,138 +1,21 @@
-# auto_repost_bot.py
-# 39Dakika: RSS -> (rewrite) -> X paylaşım (opsiyonel görsel)
-# pip: tweepy, requests, beautifulsoup4, lxml, rapidfuzz, unidecode
+# ------------------ Metin Temizleme / Rewrite (Gelişmiş) ------------------
 
-import os, json, time, re, tempfile
-from typing import List, Dict, Optional
-import requests
-from bs4 import BeautifulSoup
-from lxml import etree
-import tweepy
+import re
 from unidecode import unidecode
+from bs4 import BeautifulSoup
 
-# ------------------ Ayarlar / Env ------------------
-
-DRY_MODE = os.getenv("DRY_MODE", "false").lower() in ("1","true","yes")
-ATTACH_OG_IMAGE = os.getenv("ATTACH_OG_IMAGE", "true").lower() in ("1","true","yes")
-
-TW_API_KEY      = os.getenv("TW_API_KEY")
-TW_API_SECRET   = os.getenv("TW_API_SECRET")
-TW_ACCESS_TOKEN = os.getenv("TW_ACCESS_TOKEN")
-TW_ACCESS_SECRET= os.getenv("TW_ACCESS_SECRET")
-
-RSS_FILE   = "rss_sources.txt"   # satır / RSS URL
-STATE_FILE = "state.json"        # {"posted": ["url1", ...]}
-
-HEADERS = {"User-Agent": "Mozilla/5.0 (39DakikaBot/1.0)"}
-TIMEOUT = 15
-
-# ------------------ State & IO ------------------
-
-def load_state() -> Dict:
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {"posted": []}
-
-def save_state(state: Dict):
-    tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, STATE_FILE)
-
-def read_lines(path: str) -> List[str]:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
-    except FileNotFoundError:
-        return []
-
-def dedup_keep_order(seq: List[str]) -> List[str]:
-    seen, out = set(), []
-    for x in seq:
-        if x not in seen:
-            seen.add(x); out.append(x)
-    return out
-
-# ------------------ Twitter Clients ------------------
-
-def get_client_v2() -> tweepy.Client:
-    return tweepy.Client(
-        consumer_key=TW_API_KEY,
-        consumer_secret=TW_API_SECRET,
-        access_token=TW_ACCESS_TOKEN,
-        access_token_secret=TW_ACCESS_SECRET,
-        wait_on_rate_limit=True,
-    )
-
-def get_api_v1() -> tweepy.API:
-    auth = tweepy.OAuth1UserHandler(TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET)
-    return tweepy.API(auth, wait_on_rate_limit=True)
-
-# ------------------ HTTP / RSS ------------------
-
-def fetch(url: str) -> Optional[requests.Response]:
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        if r.ok and r.content:
-            return r
-    except Exception:
-        pass
-    return None
-
-def parse_rss_items(xml_bytes: bytes) -> List[Dict]:
-    """Basit RSS/Atom parser (feedparser yok)."""
-    items: List[Dict] = []
-    try:
-        root = etree.fromstring(xml_bytes)
-    except Exception:
-        return items
-
-    rss_items = root.findall(".//item")
-    atom_items = root.findall(".//{http://www.w3.org/2005/Atom}entry")
-
-    if rss_items:
-        for it in rss_items:
-            title = (it.findtext("title") or "").strip()
-            link  = (it.findtext("link") or "").strip() or (it.findtext("guid") or "").strip()
-            desc  = (it.findtext("description") or "").strip()
-            if title and link:
-                items.append({"title": title, "link": link, "summary": desc})
-    elif atom_items:
-        for it in atom_items:
-            title = (it.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
-            link_el = it.find("{http://www.w3.org/2005/Atom}link")
-            link = link_el.attrib.get("href", "").strip() if link_el is not None else ""
-            summary = (it.findtext("{http://www.w3.org/2005/Atom}summary") or "").strip()
-            if title and link:
-                items.append({"title": title, "link": link, "summary": summary})
-    return items
-
-def gather_candidates() -> List[Dict]:
-    urls = read_lines(RSS_FILE)
-    all_items: List[Dict] = []
-    for u in urls:
-        r = fetch(u); 
-        if not r: 
-            continue
-        all_items.extend(parse_rss_items(r.content))
-    # linke göre uniq
-    seen, uniq = set(), []
-    for it in all_items:
-        lk = it.get("link", "")
-        if lk and lk not in seen:
-            seen.add(lk); uniq.append(it)
-    return uniq
-
-# ------------------ Metin Temizleme / Rewrite ------------------
-
+MAX_LEN = 240
 SPACE_FIX = re.compile(r"\s+")
 PUNCT_FIX = re.compile(r"\s+([,.!?;:])")
 QUOTES = {'“':'"', '”':'"', '’':"'", '‘':"'", '«':'"', '»':'"'}
 
+# Cümle sonunu olası “eksik” bitişlerden ayıklarken kullanacağımız kara liste
+BAD_END_TOKENS = {"ve", "ile", "gibi", "ancak", "fakat", "ama", "çünkü", "veya", "ya da", "ya da.", "vb", "vb."}
+BAD_END_CHARS = {",", ":", ";", "—", "–", "-", "…", "“", "‘", "'", '"'}
+
 def normalize_quotes(s: str) -> str:
-    for k,v in QUOTES.items(): s = s.replace(k,v)
+    for k,v in QUOTES.items():
+        s = s.replace(k, v)
     return s
 
 def clean_html_text(s: str) -> str:
@@ -144,13 +27,35 @@ def clean_html_text(s: str) -> str:
 
 def ensure_period(s: str) -> str:
     s = s.strip()
-    if not s: return s
+    if not s:
+        return s
     return s if s[-1] in ".!?" else s + "."
 
-def split_sentences_tr(s: str) -> List[str]:
-    # kaba ama iş görür
+def is_complete_sentence(s: str) -> bool:
+    """Cümle tamam mı? (son karakter ve son kelimeye göre kaba kontrol)"""
+    if not s: return False
+    s = s.strip()
+    if s[-1] in BAD_END_CHARS: return False
+    last = s.rstrip(".!?").split()[-1].lower() if s.split() else ""
+    if last in BAD_END_TOKENS: return False
+    # çok kısa/tek kelime gibi şeyleri ele
+    if len(s) < 20 and " " not in s: return False
+    # başı büyük harf ya da sayı ile başlasın
+    if not (s[0].isupper() or s[0].isdigit()): return False
+    return True
+
+def split_sentences_tr(s: str):
+    # kısa kısım: ., !, ? ve “.” sonrası boşluğa göre böl
     parts = re.split(r"(?<=[.!?])\s+", s.strip())
-    return [p for p in parts if p]
+    # sonu berbat bitiyorsa kes
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p: continue
+        # uzun parça içinde URL/çöp varsa kırp
+        p = re.sub(r"http\S+", "", p).strip()
+        out.append(p)
+    return out
 
 def too_similar(a: str, b: str) -> bool:
     A = set(unidecode(a.lower()).split())
@@ -159,160 +64,113 @@ def too_similar(a: str, b: str) -> bool:
     inter = len(A & B) / max(1, len(A | B))
     return inter >= 0.6
 
-def pick_title_speaker(title: str) -> Optional[tuple]:
+def strip_site_trailer(title: str) -> str:
+    # "Başlık | Site Adı" gibi son ekleri at
+    return re.sub(r"\s*\|\s*[^|]+$", "", title).strip()
+
+def pick_title_speaker(title: str):
     """
-    'Ad Soyad: cümle' kalıbını yakala ve (speaker, quote) döndür.
+    'Kişi/Ünvan: cümle' kalıbını yakala → (speaker, quote)
     """
-    if ":" not in title: 
+    if ":" not in title:
         return None
     left, right = title.split(":", 1)
     left = left.strip()
-    # 'Sayın', 'Cumhurbaşkanı', 'Bakan' gibi ünvanlar kalabilir
+    right = right.strip().strip('"').strip("'")
+    # 2–6 kelime arası özne, ilk harf büyük ise makul say
     if 2 <= len(left.split()) <= 6 and left[0].isupper():
-        q = right.strip().strip('"').strip("'")
-        return (left, q)
+        return left, right
     return None
 
-def rewrite_tr(title: str, summary: str) -> str:
-    t = clean_html_text(title)
-    s = clean_html_text(summary)
+def trim_to_limit(text: str, limit: int = MAX_LEN) -> str:
+    if len(text) <= limit:
+        return text
+    # kelime sınırında kırp
+    cut = text[:limit-1].rsplit(" ", 1)[0].rstrip(",;:—–-")
+    return (cut[:limit-1] + "…").rstrip()
 
-    # Başlıktan site adı/boring parçaları at
-    t = re.sub(r"\s*\|\s*[^|]+$", "", t)              # sondaki site adlarını sil
-    t = re.sub(r"^\s*(SON DAKİKA[:\-–]?)\s*", "", t, flags=re.I)
+def score_candidate(text: str) -> int:
+    """
+    Yüksek skor = daha iyi. Basit sezgisel puanlama:
+    - tamamlanmış cümle bonusu
+    - çok tekrar/çok tırnak/çok büyük harf cezası
+    - uzunluk 120–240 arası ise bonus
+    """
+    t = text.strip()
+    score = 0
+    if is_complete_sentence(t): score += 5
+    if 120 <= len(t) <= 240: score += 3
+    if t.count('"') + t.count("'") > 4: score -= 2
+    if len([w for w in t.split() if w.isupper() and len(w) > 2]) > 2: score -= 2
+    return score
 
-    # Eğer "Kişi: ..." varsa, tek cümlede net ver
-    sp = pick_title_speaker(t)
-    if sp:
-        speaker, q = sp
-        q = re.sub(r'["“”]+', "", q).strip()
-        # cümleyi kesip ilk sağlam cümleyi al
-        q_sent = split_sentences_tr(q)[0] if q else ""
-        text = f"{speaker}: {ensure_period(q_sent or q)}"
-        # özet çok benzerse ekleme
-        if s and not too_similar(text, s):
-            s_sent = split_sentences_tr(s)[0]
-            if s_sent and not too_similar(text, s_sent):
-                text = text.rstrip() + " " + ensure_period(s_sent)
-        return text[:240].rstrip(". ") + "."
-
-    # Aksi halde: başlığı cümle yap, gerekiyorsa 1 kısa destek cümlesi ekle
-    title_sent = split_sentences_tr(t)[0] if t else ""
-    title_sent = ensure_period(title_sent)
-
-    add = ""
-    if s and not too_similar(title_sent, s):
-        s_sent = split_sentences_tr(s)[0]
-        if s_sent and not too_similar(title_sent, s_sent):
-            add = " " + ensure_period(s_sent)
-
-    text = (title_sent + add).strip()
-    # çok uzun olursa kısalt
-    if len(text) > 240:
-        text = text[:237].rstrip() + "..."
+def rebuild_without_repeated_name(text: str, speaker: str) -> str:
+    """
+    Özet cümlesinde konuşmacı adı tekrar geçiyorsa temizle:
+    'Cumhurbaşkanı Yardımcısı Cevdet Yılmaz ...' → 'Cumhurbaşkanı Yardımcısı ...'
+    """
+    # en basit: soyad/isim kombinasyonunu sil
+    parts = speaker.split()
+    if len(parts) >= 2:
+        name = parts[-2] + " " + parts[-1]
+        text = re.sub(re.escape(name), "", text, flags=re.I).strip()
+        text = SPACE_FIX.sub(" ", text)
     return text
 
-# ------------------ OG Görsel ------------------
+def rewrite_tr(title: str, summary: str) -> str:
+    """
+    Başlık + özetten 1–2 temiz cümle üretir.
+    - 'Kişi: ...' kalıbı → 'Kişi: ... .' + (gerekirse) bir kısa ek cümle
+    - tekrar ve yarım cümleler temizlenir
+    - 240 karakter sınırı
+    """
+    t_raw = strip_site_trailer(clean_html_text(title))
+    s_raw = clean_html_text(summary)
 
-def extract_og_image(url: str) -> Optional[str]:
-    r = fetch(url)
-    if not r: return None
-    try:
-        soup = BeautifulSoup(r.text, "lxml")
-        og = soup.find("meta", attrs={"property":"og:image"}) or soup.find("meta", attrs={"name":"og:image"})
-        if og and og.get("content"):
-            img = og["content"].strip()
-            if img.startswith("//"): img = "https:" + img
-            return img
-    except Exception:
-        pass
-    return None
+    # "SON DAKİKA" vs
+    t_raw = re.sub(r"^\s*(SON DAK[Iİ]KA[:\-–]?)\s*", "", t_raw, flags=re.I)
 
-def download_temp(url: str) -> Optional[str]:
-    try:
-        rr = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        if rr.ok and rr.content:
-            fd, path = tempfile.mkstemp(prefix="img_", suffix=".jpg"); os.close(fd)
-            with open(path, "wb") as f: f.write(rr.content)
-            return path
-    except Exception:
-        pass
-    return None
+    # 1) Speaker kalıbı
+    sp = pick_title_speaker(t_raw)
+    candidates = []
+    if sp:
+        speaker, quote = sp
+        quote_sentences = split_sentences_tr(quote)
+        quote_clean = quote_sentences[0] if quote_sentences else quote
+        quote_clean = ensure_period(quote_clean)
 
-def try_upload_media(image_url: str) -> Optional[str]:
-    try:
-        path = download_temp(image_url)
-        if not path: return None
-        api = get_api_v1()
-        up = api.media_upload(path)
-        try: os.unlink(path)
-        except Exception: pass
-        return getattr(up, "media_id_string", None) or str(getattr(up, "media_id", ""))
-    except Exception as e:
-        print("[WARN] Medya yüklenemedi:", e)
-        return None
+        base = f"{speaker}: {quote_clean}"
+        base = trim_to_limit(base)
 
-# ------------------ Tweet ------------------
+        # Özetin ilk düzgün cümlesini ekleyelim (isim tekrarını azalt)
+        add = ""
+        if s_raw and not too_similar(base, s_raw):
+            s1 = split_sentences_tr(s_raw)
+            s1 = [x for x in s1 if is_complete_sentence(x)]
+            if s1:
+                s_try = rebuild_without_repeated_name(s1[0], speaker)
+                if not too_similar(base, s_try):
+                    add = " " + ensure_period(s_try)
+        cand = trim_to_limit((base + add).strip())
+        candidates.append(cand)
 
-def post_tweet(text: str, image_url: Optional[str]) -> Optional[str]:
-    if DRY_MODE:
-        print("[DRY] Tweet atılacak (görsel={}):\n{}".format(bool(image_url), text))
-        return "DRY"
+    # 2) Başlık cümlesi + özetten 1 kısa cümle
+    title_first = split_sentences_tr(t_raw)
+    if title_first:
+        t1 = ensure_period(title_first[0])
+        t1 = trim_to_limit(t1)
+        add = ""
+        if s_raw and not too_similar(t1, s_raw):
+            s1 = split_sentences_tr(s_raw)
+            s1 = [x for x in s1 if is_complete_sentence(x)]
+            if s1 and not too_similar(t1, s1[0]):
+                add = " " + ensure_period(s1[0])
+        cand2 = trim_to_limit((t1 + add).strip())
+        candidates.append(cand2)
 
-    client = get_client_v2()
-    media_ids = None
-    if ATTACH_OG_IMAGE and image_url:
-        mid = try_upload_media(image_url)
-        if mid: media_ids = [mid]
-        else:   print("[WARN] Görsel eklenemedi, metinle devam.")
+    # 3) Sadece başlık (fallback)
+    candidates.append(trim_to_limit(ensure_period(t_raw)))
 
-    try:
-        if media_ids:
-            resp = client.create_tweet(text=text, media_ids=media_ids)
-        else:
-            resp = client.create_tweet(text=text)
-        tid = getattr(resp, "data", {}).get("id")
-        print(f"[OK] Tweet gönderildi. ID: {tid}")
-        return tid
-    except Exception as e:
-        print("Error:", e)
-        return None
-
-# ------------------ Akış ------------------
-
-def choose_unposted(cands: List[Dict], posted: List[str]) -> Optional[Dict]:
-    for it in cands:
-        lk = it.get("link", "")
-        if lk and lk not in posted:
-            return it
-    return None
-
-def main():
-    state = load_state()
-    posted = state.get("posted", [])
-
-    cands = gather_candidates()
-    if not cands:
-        print("[INFO] RSS boş."); return
-
-    item = choose_unposted(cands, posted)
-    if not item:
-        print("[INFO] Yeni içerik yok."); return
-
-    title   = item.get("title")   or ""
-    summary = item.get("summary") or ""
-    link    = item.get("link")    or ""
-
-    text = rewrite_tr(title, summary)
-    image_url = extract_og_image(link)
-
-    tid = post_tweet(text, image_url)
-    if tid:
-        posted.append(link)
-        state["posted"] = dedup_keep_order(posted)[-1000:]
-        save_state(state)
-
-if __name__ == "__main__":
-    miss = [k for k in ("TW_API_KEY","TW_API_SECRET","TW_ACCESS_TOKEN","TW_ACCESS_SECRET") if not os.getenv(k)]
-    if miss: print("[WARN] Eksik env:", miss)
-    main()
+    # En iyi aday
+    best = max(candidates, key=score_candidate)
+    return best
